@@ -1,0 +1,55 @@
+export async function excelenciaRoutes(app) {
+  // GET /v1/excelencia/metricas
+  app.get('/v1/excelencia/metricas', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const base = await db.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'ativo')     AS ativos,
+          COUNT(*) FILTER (WHERE status = 'cancelado') AS cancelados,
+          COUNT(*) AS total_fechados
+        FROM contratos
+      `)
+
+      const fatSeries = await db.query(`
+        SELECT date_trunc('month', encerrado_em) AS mes,
+               SUM(fat_gerado) AS total
+        FROM lives
+        GROUP BY 1 ORDER BY 1 DESC LIMIT 2
+      `)
+
+      const b = base.rows[0]
+      const [mesAtual, mesAnterior] = fatSeries.rows
+
+      const ativos       = Number(b.ativos)
+      const cancelados   = Number(b.cancelados)
+      const total        = Number(b.total_fechados)
+      const taxaRetencao = total > 0 ? Math.round((ativos / total) * 100) : 0
+
+      const fatMes      = Number(mesAtual?.total ?? 0)
+      const fatMesAnt   = Number(mesAnterior?.total ?? 0)
+      const crescimento = fatMesAnt > 0
+        ? Math.round(((fatMes - fatMesAnt) / fatMesAnt) * 100)
+        : 0
+
+      // Score de excelência: retenção 40% + crescimento 30% + base ativa 30%
+      const scoreRetencao    = Math.min(taxaRetencao, 100) * 0.4
+      const scoreCrescimento = Math.min(Math.max(crescimento + 50, 0), 100) * 0.3
+      const scoreBase        = Math.min(ativos * 2, 100) * 0.3
+      const score            = Math.round(scoreRetencao + scoreCrescimento + scoreBase)
+
+      return {
+        ativos,
+        cancelados,
+        taxa_retencao: taxaRetencao,
+        fat_mes_atual:    fatMes,
+        fat_mes_anterior: fatMesAnt,
+        crescimento_pct:  crescimento,
+        score,
+      }
+    } finally {
+      db.release()
+    }
+  })
+}

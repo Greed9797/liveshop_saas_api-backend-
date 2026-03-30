@@ -1,0 +1,148 @@
+import { z } from 'zod'
+
+const custoSchema = z.object({
+  descricao:   z.string().min(1),
+  valor:       z.number().positive(),
+  tipo:        z.enum(['aluguel','salario','energia','internet','outros']),
+  competencia: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/, 'Formato: YYYY-MM ou YYYY-MM-DD'),
+})
+
+export async function financeiroRoutes(app) {
+  // GET /v1/financeiro/resumo?mes=&ano=
+  app.get('/v1/financeiro/resumo', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const { mes, ano } = request.query
+    const periodo = mes && ano
+      ? `${ano}-${String(mes).padStart(2, '0')}-01`
+      : new Date().toISOString().slice(0, 7) + '-01'
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(`
+        SELECT
+          COALESCE(SUM(c.valor_fixo), 0)                           AS fat_bruto_fixo,
+          COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0)  AS fat_bruto_comissao,
+          COALESCE(cu.total_custos, 0)                              AS total_custos
+        FROM contratos c
+        LEFT JOIN lives l ON l.cliente_id = c.cliente_id
+          AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
+        LEFT JOIN (
+          SELECT SUM(valor) AS total_custos
+          FROM custos
+          WHERE date_trunc('month', competencia) = date_trunc('month', $1::date)
+        ) cu ON true
+        WHERE c.status = 'ativo'
+      `, [periodo])
+
+      const r = result.rows[0]
+      const fat_bruto  = Number(r.fat_bruto_fixo) + Number(r.fat_bruto_comissao)
+      const fat_liquido = Math.max(0, fat_bruto - Number(r.total_custos))
+      return { fat_bruto, fat_liquido, total_custos: Number(r.total_custos), periodo }
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/financeiro/faturamento?periodo=YYYY-MM
+  app.get('/v1/financeiro/faturamento', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const periodo = (request.query.periodo ?? new Date().toISOString().slice(0, 7)) + '-01'
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const porCliente = await db.query(`
+        SELECT cl.nome, cl.nicho, COALESCE(SUM(l.fat_gerado), 0) AS total
+        FROM clientes cl
+        LEFT JOIN lives l ON l.cliente_id = cl.id
+          AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
+        WHERE cl.status = 'ativo'
+        GROUP BY cl.id, cl.nome, cl.nicho
+        ORDER BY total DESC
+      `, [periodo])
+
+      return { periodo, por_cliente: porCliente.rows }
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/financeiro/fluxo-caixa?mes=&ano=
+  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const { mes, ano } = request.query
+    const periodo = mes && ano
+      ? `${ano}-${String(mes).padStart(2, '0')}-01`
+      : new Date().toISOString().slice(0, 7) + '-01'
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const entradas = await db.query(`
+        SELECT date_trunc('day', encerrado_em) AS dia, SUM(fat_gerado) AS valor
+        FROM lives
+        WHERE date_trunc('month', encerrado_em) = date_trunc('month', $1::date)
+        GROUP BY 1 ORDER BY 1
+      `, [periodo])
+
+      const saidas = await db.query(`
+        SELECT competencia AS dia, SUM(valor) AS valor
+        FROM custos
+        WHERE date_trunc('month', competencia) = date_trunc('month', $1::date)
+        GROUP BY 1 ORDER BY 1
+      `, [periodo])
+
+      return { periodo, entradas: entradas.rows, saidas: saidas.rows }
+    } finally {
+      db.release()
+    }
+  })
+
+  // POST /v1/financeiro/custos
+  app.post('/v1/financeiro/custos', { preHandler: app.authenticate }, async (request, reply) => {
+    const parsed = custoSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+
+    const { tenant_id } = request.user
+    const { descricao, valor, tipo, competencia } = parsed.data
+
+    const result = await app.db.query(
+      `INSERT INTO custos (tenant_id, descricao, valor, tipo, competencia)
+       VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
+      [tenant_id, descricao, valor, tipo, competencia]
+    )
+    return reply.code(201).send(result.rows[0])
+  })
+
+  // GET /v1/financeiro/custos
+  app.get('/v1/financeiro/custos', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const mes = request.query.mes ?? new Date().toISOString().slice(0, 7)
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `SELECT id, descricao, valor, tipo, competencia
+         FROM custos
+         WHERE date_trunc('month', competencia) = date_trunc('month', ($1 || '-01')::date)
+         ORDER BY competencia DESC`,
+        [mes]
+      )
+      return result.rows
+    } finally {
+      db.release()
+    }
+  })
+
+  // DELETE /v1/financeiro/custos/:id
+  app.delete('/v1/financeiro/custos/:id', { preHandler: app.authenticate }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `DELETE FROM custos WHERE id = $1 RETURNING id`, [request.params.id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Custo não encontrado' })
+      return { ok: true }
+    } finally {
+      db.release()
+    }
+  })
+}
