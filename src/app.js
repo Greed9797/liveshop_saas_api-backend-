@@ -16,6 +16,7 @@ import { recomendacoesRoutes } from './routes/recomendacoes.js'
 import { franqueadoRoutes } from './routes/franqueado.js'
 import { manuaisRoutes } from './routes/manuais.js'
 import { tiktokRoutes } from './routes/tiktok.js'
+import { cepRoutes } from './routes/cep.js'
 
 export async function buildApp(opts = {}) {
   const app = Fastify({
@@ -41,6 +42,7 @@ export async function buildApp(opts = {}) {
   await app.register(franqueadoRoutes)
   await app.register(manuaisRoutes)
   await app.register(tiktokRoutes)
+  await app.register(cepRoutes)
 
   app.get('/health', () => ({ ok: true }))
 
