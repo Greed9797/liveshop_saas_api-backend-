@@ -81,24 +81,31 @@ export async function contratosRoutes(app) {
                     || request.socket?.remoteAddress
                     || 'unknown'
 
-      await db.query(
-        `UPDATE contratos
-         SET status = $1,
-             signature_type = 'pad',
-             signature_image_url = $2,
-             signed_ip = $3,
-             accepted_terms_at = NOW(),
-             assinado_em = NOW(),
-             ativado_em = $4
-         WHERE id = $5`,
-        [novoStatus, signatureUrl, clientIp, aprovado ? new Date() : null, request.params.id]
-      )
-
-      if (aprovado) {
+      await db.query('BEGIN')
+      try {
         await db.query(
-          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
-          [contrato.cliente_id]
+          `UPDATE contratos
+           SET status = $1,
+               signature_type = 'pad',
+               signature_image_url = $2,
+               signed_ip = $3,
+               accepted_terms_at = NOW(),
+               assinado_em = NOW(),
+               ativado_em = $4
+           WHERE id = $5`,
+          [novoStatus, signatureUrl, clientIp, aprovado ? new Date() : null, request.params.id]
         )
+
+        if (aprovado) {
+          await db.query(
+            `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
+            [contrato.cliente_id]
+          )
+        }
+        await db.query('COMMIT')
+      } catch (txErr) {
+        await db.query('ROLLBACK')
+        throw txErr
       }
 
       return { aprovado, score, status: novoStatus, requer_backoffice: !aprovado }
