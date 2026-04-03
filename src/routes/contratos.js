@@ -42,6 +42,71 @@ export async function contratosRoutes(app) {
     }
   })
 
+  // POST /v1/contratos/:id/assinar-digital
+  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.authenticate }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { signatureImageBase64, acceptedTerms } = request.body ?? {}
+
+    if (!acceptedTerms) {
+      return reply.code(400).send({ error: 'É necessário aceitar os termos para assinar' })
+    }
+    if (!signatureImageBase64) {
+      return reply.code(400).send({ error: 'Imagem da assinatura é obrigatória' })
+    }
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const q = await db.query(
+        `SELECT c.id, c.status, c.cliente_id,
+                cl.fat_anual, cl.cnpj, cl.score as cliente_score
+         FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id
+         WHERE c.id = $1 AND c.status = 'rascunho'`,
+        [request.params.id]
+      )
+      const contrato = q.rows[0]
+      if (!contrato) {
+        return reply.code(400).send({ error: 'Contrato não encontrado ou não está em rascunho' })
+      }
+
+      // Score interno (Auditoria Comercial)
+      let score = 0
+      if (Number(contrato.fat_anual) > 50000) score += 50
+      if (contrato.cnpj) score += 20
+      if ((contrato.cliente_score ?? 0) >= 70) score += 30
+
+      const aprovado = score >= 60
+      const novoStatus = aprovado ? 'ativo' : 'em_analise'
+      const signatureUrl = `data:image/png;base64,${signatureImageBase64}`
+      const clientIp = request.headers['x-forwarded-for']?.split(',')[0]?.trim()
+                    || request.socket?.remoteAddress
+                    || 'unknown'
+
+      await db.query(
+        `UPDATE contratos
+         SET status = $1,
+             signature_type = 'pad',
+             signature_image_url = $2,
+             signed_ip = $3,
+             accepted_terms_at = NOW(),
+             assinado_em = NOW(),
+             ativado_em = $4
+         WHERE id = $5`,
+        [novoStatus, signatureUrl, clientIp, aprovado ? new Date() : null, request.params.id]
+      )
+
+      if (aprovado) {
+        await db.query(
+          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
+          [contrato.cliente_id]
+        )
+      }
+
+      return { aprovado, score, status: novoStatus, requer_backoffice: !aprovado }
+    } finally {
+      db.release()
+    }
+  })
+
   // POST /v1/contratos/:id/analisar → score automático → ativo ou cancelado
   app.post('/v1/contratos/:id/analisar', { preHandler: app.authenticate }, async (request, reply) => {
     const { tenant_id } = request.user
