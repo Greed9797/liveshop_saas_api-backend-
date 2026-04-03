@@ -5,7 +5,7 @@
 export async function franqueadoRoutes(app) {
   app.get(
     '/v1/franqueado/unidades',
-    { onRequest: [app.authenticate, app.requirePapel('franqueador_master')] },
+    { onRequest: [app.authenticate, app.requirePapel(['franqueador_master'])] },
     async (req, reply) => {
       const { rows } = await app.db.query(`
         SELECT
@@ -21,7 +21,7 @@ export async function franqueadoRoutes(app) {
         LEFT JOIN clientes   c  ON c.tenant_id = t.id
         LEFT JOIN contratos  ct ON ct.tenant_id = t.id
         LEFT JOIN lives      l  ON l.tenant_id = t.id
-          AND date_trunc('month', l.iniciada_em) = date_trunc('month', NOW())
+          AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
         WHERE t.id != $1
         GROUP BY t.id, t.nome
         ORDER BY fat_mes DESC

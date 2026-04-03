@@ -19,19 +19,26 @@ export async function financeiroRoutes(app) {
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(`
-        SELECT
-          COALESCE(SUM(c.valor_fixo), 0)                           AS fat_bruto_fixo,
-          COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0)  AS fat_bruto_comissao,
-          COALESCE(cu.total_custos, 0)                              AS total_custos
-        FROM contratos c
-        LEFT JOIN lives l ON l.cliente_id = c.cliente_id
-          AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
-        LEFT JOIN (
-          SELECT SUM(valor) AS total_custos
+        WITH contratos_mes AS (
+          SELECT
+            COALESCE(SUM(c.valor_fixo), 0)                          AS fat_bruto_fixo,
+            COALESCE(SUM(l.fat_gerado * c.comissao_pct / 100.0), 0) AS fat_bruto_comissao
+          FROM contratos c
+          LEFT JOIN lives l ON l.cliente_id = c.cliente_id
+            AND date_trunc('month', l.encerrado_em) = date_trunc('month', $1::date)
+          WHERE c.status = 'ativo'
+        ),
+        custos_mes AS (
+          SELECT COALESCE(SUM(valor), 0) AS total_custos
           FROM custos
           WHERE date_trunc('month', competencia) = date_trunc('month', $1::date)
-        ) cu ON true
-        WHERE c.status = 'ativo'
+        )
+        SELECT
+          cm.fat_bruto_fixo,
+          cm.fat_bruto_comissao,
+          cu.total_custos
+        FROM contratos_mes cm
+        CROSS JOIN custos_mes cu
       `, [periodo])
 
       const r = result.rows[0]
