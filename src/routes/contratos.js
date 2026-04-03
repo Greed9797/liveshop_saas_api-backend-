@@ -187,4 +187,125 @@ export async function contratosRoutes(app) {
       db.release()
     }
   })
+
+  // GET /v1/analise-credito
+  app.get('/v1/analise-credito', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
+                c.is_risco_franqueado, c.risco_assumido_em,
+                c.arquivado_em, c.arquivado_motivo, c.assinado_em,
+                cl.nome, cl.cnpj, cl.fat_anual, cl.nicho, cl.score,
+                cl.razao_social
+         FROM contratos c
+         JOIN clientes cl ON cl.id = c.cliente_id
+         WHERE c.tenant_id = $1
+           AND c.status IN ('em_analise', 'ativo', 'arquivado')
+         ORDER BY c.assinado_em DESC NULLS LAST`,
+        [tenant_id]
+      )
+      return result.rows
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/contratos/:id/aprovar
+  app.patch('/v1/contratos/:id/aprovar', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      await db.query('BEGIN')
+      try {
+        const q = await db.query(
+          `UPDATE contratos
+           SET status = 'ativo', ativado_em = NOW()
+           WHERE id = $1 AND status = 'em_analise'
+           RETURNING id, cliente_id`,
+          [request.params.id]
+        )
+        if (!q.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Contrato não está em análise' })
+        }
+
+        await db.query(
+          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
+          [q.rows[0].cliente_id]
+        )
+        await db.query('COMMIT')
+      } catch (txErr) {
+        await db.query('ROLLBACK')
+        throw txErr
+      }
+      return { ok: true, status: 'ativo' }
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/contratos/:id/arquivar
+  app.patch('/v1/contratos/:id/arquivar', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const motivo = (request.body ?? {}).motivo ?? null
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE contratos
+         SET status = 'arquivado', arquivado_em = NOW(), arquivado_motivo = $2
+         WHERE id = $1 AND status IN ('em_analise','rascunho')
+         RETURNING id, status`,
+        [request.params.id, motivo]
+      )
+      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não pode ser arquivado' })
+      return result.rows[0]
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/contratos/:id/sinalizar-risco
+  app.patch('/v1/contratos/:id/sinalizar-risco', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      await db.query('BEGIN')
+      try {
+        const q = await db.query(
+          `UPDATE contratos
+           SET status = 'ativo',
+               is_risco_franqueado = true,
+               risco_assumido_em = NOW(),
+               ativado_em = NOW()
+           WHERE id = $1 AND status = 'em_analise'
+           RETURNING id, cliente_id`,
+          [request.params.id]
+        )
+        if (!q.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Contrato não está em análise' })
+        }
+
+        await db.query(
+          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
+          [q.rows[0].cliente_id]
+        )
+        await db.query('COMMIT')
+      } catch (txErr) {
+        await db.query('ROLLBACK')
+        throw txErr
+      }
+      return { ok: true, status: 'ativo', is_risco_franqueado: true }
+    } finally {
+      db.release()
+    }
+  })
 }
