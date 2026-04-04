@@ -120,6 +120,7 @@ async function startConnector(liveId, tenantId, username) {
     likes_count: 0,
     comments_count: 0,
     dirty: false,
+    flushing: false,
     lastFlush: Date.now(),
   }
 
@@ -142,35 +143,10 @@ async function startConnector(liveId, tenantId, username) {
     state.dirty = true
   })
 
-  connection.on('chat', async (data) => {
-    state.comments_count += 1
-    state.dirty = true
-
-    // Keyword matching to detect orders (e.g. "quero o kit 01")
-    const comment = (data.comment ?? '').toLowerCase()
-    if (!comment.includes('quero')) return
-
-    const matched = produtos.find(p =>
-      comment.includes(p.produto_nome.toLowerCase())
-    )
-    if (!matched) return
-
-    state.total_orders += 1
-    state.gmv += Number(matched.valor_unit)
-    state.dirty = true
-
-    // Immediate dual-write to live_products
-    try {
-      await _db.query(
-        `UPDATE live_products
-         SET quantidade = quantidade + 1,
-             valor_total = valor_total + $1
-         WHERE live_id = $2 AND tenant_id = $3 AND produto_nome ILIKE $4`,
-        [matched.valor_unit, liveId, tenantId, matched.produto_nome]
-      )
-    } catch (err) {
-      _log?.error({ err, liveId }, 'tiktokManager: erro ao atualizar live_products')
-    }
+  connection.on('chat', (data) => {
+    _handleChat(data, { liveId, tenantId, state, produtos }).catch(err => {
+      _log?.error({ err, liveId }, 'tiktokManager: erro não tratado no handler chat')
+    })
   })
 
   connection.on('disconnected', () => {
@@ -184,9 +160,14 @@ async function startConnector(liveId, tenantId, username) {
   })
   // ─────────────────────────────────────────────────────────────────────────
 
-  const flushTimer = setInterval(async () => {
+  let flushTimer
+  flushTimer = setInterval(async () => {
     const entry = _liveMap.get(liveId)
-    if (entry) await _flushToDb(liveId, entry)
+    if (entry && entry.flushTimer === flushTimer) {
+      await _flushToDb(liveId, entry).catch(err => {
+        _log?.error({ err, liveId }, 'tiktokManager: erro no flush periódico')
+      })
+    }
   }, FLUSH_INTERVAL_MS)
 
   _liveMap.set(liveId, {
@@ -211,8 +192,9 @@ async function startConnector(liveId, tenantId, username) {
 
 async function _flushToDb(liveId, entry) {
   const { state, tenantId } = entry
-  if (!state.dirty) return
+  if (!state.dirty || state.flushing) return
 
+  state.flushing = true
   try {
     await _db.query(
       `INSERT INTO live_snapshots
@@ -228,17 +210,49 @@ async function _flushToDb(liveId, entry) {
 
     state.dirty = false
     state.lastFlush = Date.now()
-
-    // Notify SSE handlers
-    _emitter.emit(`snapshot:${liveId}`, {
-      viewer_count:   state.viewer_count,
-      total_viewers:  state.total_viewers,
-      total_orders:   state.total_orders,
-      gmv:            state.gmv,
-      likes_count:    state.likes_count,
-      comments_count: state.comments_count,
-    })
   } catch (err) {
     _log?.error({ err, liveId }, 'tiktokManager: falha no flush — estado preservado em memória')
+    return
+  } finally {
+    state.flushing = false
+  }
+
+  // Emit outside try/catch so SSE listener exceptions don't get logged as flush failures
+  _emitter.emit(`snapshot:${liveId}`, {
+    viewer_count:   state.viewer_count,
+    total_viewers:  state.total_viewers,
+    total_orders:   state.total_orders,
+    gmv:            state.gmv,
+    likes_count:    state.likes_count,
+    comments_count: state.comments_count,
+  })
+}
+
+async function _handleChat(data, { liveId, tenantId, state, produtos }) {
+  state.comments_count += 1
+  state.dirty = true
+
+  const comment = (data.comment ?? '').toLowerCase()
+  if (!comment.includes('quero')) return
+
+  const matched = produtos.find(p =>
+    comment.includes(p.produto_nome.toLowerCase())
+  )
+  if (!matched) return
+
+  state.total_orders += 1
+  state.gmv += Number(matched.valor_unit)
+  state.dirty = true
+
+  try {
+    await _db.query(
+      `UPDATE live_products
+       SET quantidade = quantidade + 1,
+           valor_total = valor_total + $1
+       WHERE live_id = $2 AND tenant_id = $3 AND produto_nome ILIKE $4`,
+      [matched.valor_unit, liveId, tenantId, matched.produto_nome]
+    )
+  } catch (err) {
+    _log?.error({ err, liveId }, 'tiktokManager: erro ao atualizar live_products')
   }
 }
