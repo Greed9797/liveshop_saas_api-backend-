@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/asaas.js'
+import { has as managerHas, stopConnector } from '../services/tiktok-connector-manager.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
@@ -835,6 +836,13 @@ export async function cabinesRoutes(app) {
             clienteId: live.cliente_id,
             valor: comissao,
           }).catch(err => app.log.error({ err }, 'gerarBoletoRoyaltiesAsaas: erro inesperado'))
+        }
+
+        // Parar connector TikTok e fazer flush final do snapshot (fire-and-forget)
+        if (managerHas(live.id)) {
+          stopConnector(live.id).catch(err =>
+            app.log.error({ err, liveId: live.id }, 'tiktokManager: falha ao parar connector no encerramento')
+          )
         }
 
         return { ok: true, fat_gerado: parsed.data.fat_gerado, comissao_calculada: comissao }
