@@ -1,5 +1,3 @@
-'use strict';
-
 import crypto from 'crypto';
 
 const BASE_URL = process.env.ASAAS_SANDBOX === 'true'
@@ -11,18 +9,28 @@ const BASE_URL = process.env.ASAAS_SANDBOX === 'true'
  * Lança erro com mensagem legível se status >= 400.
  */
 async function _request(method, path, body = null) {
+  const apiKey = process.env.ASAAS_API_KEY;
+  if (!apiKey) throw new Error('ASAAS_API_KEY não configurada');
+
   const options = {
     method,
     headers: {
-      'access_token': process.env.ASAAS_API_KEY,
+      'access_token': apiKey,
       'Content-Type': 'application/json',
     },
   };
-
   if (body) options.body = JSON.stringify(body);
 
-  const res = await fetch(`${BASE_URL}${path}`, options);
-  const data = await res.json();
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${path}`, options);
+  } catch (networkErr) {
+    throw new Error(`Asaas rede indisponível (${method} ${path}): ${networkErr.message}`);
+  }
+
+  const data = res.ok
+    ? await res.json()
+    : await res.json().catch(() => ({}));
 
   if (!res.ok) {
     const msg = data.errors?.map(e => e.description).join('; ') ?? 'Erro desconhecido Asaas';
@@ -46,15 +54,22 @@ export async function buscarOuCriarCustomer({ nome, cpfCnpj, email, celular }) {
     }
   }
 
-  const created = await _request('POST', '/customers', {
-    name: nome,
-    cpfCnpj: cpfCnpjLimpo || undefined,
-    email: email || undefined,
-    mobilePhone: celular?.replace(/\D/g, '') || undefined,
-    notificationDisabled: false,
-  });
-
-  return created.id;
+  try {
+    const created = await _request('POST', '/customers', {
+      name: nome,
+      cpfCnpj: cpfCnpjLimpo || undefined,
+      email: email || undefined,
+      mobilePhone: celular?.replace(/\D/g, '') || undefined,
+      notificationDisabled: false,
+    });
+    return created.id;
+  } catch (err) {
+    if (cpfCnpjLimpo && err.message.toLowerCase().includes('already')) {
+      const retry = await _request('GET', `/customers?cpfCnpj=${cpfCnpjLimpo}`);
+      if (retry.data?.length > 0) return retry.data[0].id;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -80,6 +95,11 @@ export async function criarCobranca({
   externalReference, // nosso boleto.id
   billingType = 'BOLETO',
 }) {
+  const BILLING_TYPES = new Set(['BOLETO', 'PIX', 'CREDIT_CARD', 'UNDEFINED']);
+  if (!BILLING_TYPES.has(billingType)) {
+    throw new Error(`billingType inválido: ${billingType}. Use: BOLETO, PIX, CREDIT_CARD ou UNDEFINED`);
+  }
+
   return await _request('POST', '/payments', {
     customer: asaasCustomerId,
     billingType,
@@ -94,11 +114,17 @@ export async function criarCobranca({
 
 /**
  * Valida o token de webhook enviado pelo Asaas no header 'asaas-access-token'.
+ * Usa comparação timing-safe para evitar timing attacks.
  * Lança erro se inválido — impede processamento de payloads falsos.
  */
 export function validarWebhookToken(receivedToken) {
-  const expected = process.env.ASAAS_API_KEY;
-  if (!receivedToken || receivedToken !== expected) {
+  const expected = process.env.ASAAS_WEBHOOK_TOKEN ?? '';
+  if (!receivedToken || receivedToken.length !== expected.length) {
+    throw new Error('Token de webhook Asaas inválido');
+  }
+  const a = Buffer.from(receivedToken);
+  const b = Buffer.from(expected);
+  if (!crypto.timingSafeEqual(a, b)) {
     throw new Error('Token de webhook Asaas inválido');
   }
 }
