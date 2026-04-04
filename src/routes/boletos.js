@@ -80,10 +80,9 @@ export async function boletosRoutes(app) {
     }
 
     const payload = request.body ?? {}
-    const eventType = payload.event
+    const eventType = payload.event ?? 'UNKNOWN'   // Fix D: default if absent
     const payment = payload.payment
 
-    // Buscar boleto pelo externalReference (nosso boleto.id)
     let boletoId = null
     let tenantId = null
 
@@ -95,24 +94,28 @@ export async function boletosRoutes(app) {
       if (rows.length > 0) {
         boletoId = rows[0].id
         tenantId = rows[0].tenant_id
+      } else {
+        app.log.warn({ externalReference: payment.externalReference }, 'webhook asaas: externalReference não encontrado em boletos')
       }
     }
 
-    // Persistir evento bruto no log imutável (sempre, mesmo sem boletoId)
-    await app.db.query(
-      `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw, boleto_id)
-       VALUES ($1, 'asaas', $2, $3::jsonb, $4)`,
-      [tenantId, eventType, JSON.stringify(payload), boletoId]
-    )
-
-    // Processar confirmação de pagamento
-    if (eventType === 'PAYMENT_RECEIVED' && boletoId) {
+    try {
       await app.db.query(
-        `UPDATE boletos
-         SET status = 'pago', pago_em = NOW(), asaas_id = $2
-         WHERE id = $1 AND status != 'pago'`,
-        [boletoId, payment.id]
+        `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw, boleto_id)
+         VALUES ($1, 'asaas', $2, $3::jsonb, $4)`,
+        [tenantId, eventType, JSON.stringify(payload), boletoId]
       )
+
+      if (eventType === 'PAYMENT_RECEIVED' && boletoId && payment?.id) {  // Fix E: guard payment.id
+        await app.db.query(
+          `UPDATE boletos
+           SET status = 'pago', pago_em = NOW(), asaas_id = $2
+           WHERE id = $1 AND status != 'pago'`,
+          [boletoId, payment.id]
+        )
+      }
+    } catch (err) {
+      app.log.error({ err }, 'webhook asaas: erro ao processar evento no banco')
     }
 
     return reply.code(200).send({ received: true })

@@ -118,13 +118,16 @@ export async function criarCobranca({
  * Lança erro se inválido — impede processamento de payloads falsos.
  */
 export function validarWebhookToken(receivedToken) {
-  const expected = process.env.ASAAS_WEBHOOK_TOKEN ?? '';
-  if (!receivedToken || receivedToken.length !== expected.length) {
-    throw new Error('Token de webhook Asaas inválido');
+  const expected = process.env.ASAAS_WEBHOOK_TOKEN ?? ''
+  if (!expected || expected.length < 16) {
+    throw new Error('ASAAS_WEBHOOK_TOKEN não configurado ou muito curto (mínimo 16 caracteres)')
   }
-  const a = Buffer.from(receivedToken);
-  const b = Buffer.from(expected);
+  if (!receivedToken || receivedToken.length !== expected.length) {
+    throw new Error('Token de webhook Asaas inválido')
+  }
+  const a = Buffer.from(receivedToken)
+  const b = Buffer.from(expected)
   if (!crypto.timingSafeEqual(a, b)) {
-    throw new Error('Token de webhook Asaas inválido');
+    throw new Error('Token de webhook Asaas inválido')
   }
 }
