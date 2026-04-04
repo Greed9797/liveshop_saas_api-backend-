@@ -1,3 +1,5 @@
+import { validarWebhookToken } from '../services/asaas.js'
+
 export async function boletosRoutes(app) {
   // GET /v1/boletos
   app.get('/v1/boletos', { preHandler: app.authenticate }, async (request) => {
@@ -10,7 +12,8 @@ export async function boletosRoutes(app) {
          WHERE status = 'pendente' AND vencimento < CURRENT_DATE`
       )
       const result = await db.query(
-        `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia
+        `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
+                asaas_id, asaas_url, asaas_pix_copia_cola, gerado_automaticamente, asaas_error
          FROM boletos ORDER BY vencimento DESC`
       )
       return result.rows
@@ -64,5 +67,54 @@ export async function boletosRoutes(app) {
       )
     }
     return { received: true }
+  })
+
+  // POST /v1/webhooks/asaas — seguro por token no header
+  app.post('/v1/webhooks/asaas', async (request, reply) => {
+    const receivedToken = request.headers['asaas-access-token']
+
+    try {
+      validarWebhookToken(receivedToken)
+    } catch {
+      return reply.code(401).send({ error: 'Unauthorized' })
+    }
+
+    const payload = request.body ?? {}
+    const eventType = payload.event
+    const payment = payload.payment
+
+    // Buscar boleto pelo externalReference (nosso boleto.id)
+    let boletoId = null
+    let tenantId = null
+
+    if (payment?.externalReference) {
+      const { rows } = await app.db.query(
+        `SELECT id, tenant_id FROM boletos WHERE id = $1`,
+        [payment.externalReference]
+      )
+      if (rows.length > 0) {
+        boletoId = rows[0].id
+        tenantId = rows[0].tenant_id
+      }
+    }
+
+    // Persistir evento bruto no log imutável (sempre, mesmo sem boletoId)
+    await app.db.query(
+      `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw, boleto_id)
+       VALUES ($1, 'asaas', $2, $3::jsonb, $4)`,
+      [tenantId, eventType, JSON.stringify(payload), boletoId]
+    )
+
+    // Processar confirmação de pagamento
+    if (eventType === 'PAYMENT_RECEIVED' && boletoId) {
+      await app.db.query(
+        `UPDATE boletos
+         SET status = 'pago', pago_em = NOW(), asaas_id = $2
+         WHERE id = $1 AND status != 'pago'`,
+        [boletoId, payment.id]
+      )
+    }
+
+    return reply.code(200).send({ received: true })
   })
 }
