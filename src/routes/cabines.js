@@ -506,12 +506,12 @@ export async function cabinesRoutes(app) {
       const liveData = liveQ.rows[0]
 
       const snapshotQ = await db.query(`
-        SELECT viewer_count, total_orders, gmv, captured_at
+        SELECT viewer_count, total_orders, gmv, likes_count, comments_count, captured_at
         FROM live_snapshots
         WHERE live_id = $1
         ORDER BY captured_at DESC LIMIT 1
       `, [liveId])
-      const snapshot = snapshotQ.rows[0] || { viewer_count: 0, total_orders: 0, gmv: 0 }
+      const snapshot = snapshotQ.rows[0] || { viewer_count: 0, total_orders: 0, gmv: 0, likes_count: 0, comments_count: 0 }
 
       const topProdutoQ = await db.query(`
         SELECT produto_nome, quantidade, valor_total
@@ -526,6 +526,7 @@ export async function cabinesRoutes(app) {
       const duracaoMinutos = Math.floor((agora - iniciadoEm) / 1000 / 60)
 
       return {
+        live_id: liveId,
         viewer_count: snapshot.viewer_count,
         gmv_atual: parseFloat(snapshot.gmv),
         total_orders: snapshot.total_orders,

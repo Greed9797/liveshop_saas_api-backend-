@@ -3,6 +3,8 @@
  * Responsável por conectar a conta do TikTok do Franqueado e gerar os Tokens
  */
 
+import { getEmitter } from '../services/tiktok-connector-manager.js'
+
 export async function tiktokRoutes(app) {
   // Configuração do App do TikTok (seria definido no .env na versão de produção)
   const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY || 'SUA_CLIENT_KEY_AQUI';
@@ -151,4 +153,69 @@ export async function tiktokRoutes(app) {
       dbTenant.release();
     }
   });
+
+  // ── GET /v1/lives/:liveId/stream — SSE real-time ──────────────────────────
+  app.get('/v1/lives/:liveId/stream', { preHandler: [app.authenticate] }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { liveId } = request.params
+
+    // Validate live belongs to tenant and is active
+    const { rows } = await app.db.query(
+      `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2 AND status = 'em_andamento'`,
+      [liveId, tenant_id]
+    )
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: 'Live não encontrada ou não está ao vivo' })
+    }
+
+    // Take full control of the HTTP response
+    reply.hijack()
+
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    reply.raw.flushHeaders()
+
+    // Send the most recent snapshot immediately (initial state)
+    try {
+      const { rows: snap } = await app.db.query(
+        `SELECT viewer_count, total_viewers, total_orders, gmv, likes_count, comments_count
+         FROM live_snapshots
+         WHERE live_id = $1
+         ORDER BY captured_at DESC LIMIT 1`,
+        [liveId]
+      )
+      if (snap[0]) {
+        reply.raw.write(`data: ${JSON.stringify(snap[0])}\n\n`)
+      }
+    } catch (err) {
+      app.log.warn({ err, liveId }, 'SSE: falha ao buscar snapshot inicial')
+    }
+
+    // Register listener on manager EventEmitter
+    const emitter = getEmitter()
+    const eventName = `snapshot:${liveId}`
+    const handler = (snapshot) => {
+      try {
+        reply.raw.write(`data: ${JSON.stringify(snapshot)}\n\n`)
+      } catch {}
+    }
+    emitter.on(eventName, handler)
+
+    // Heartbeat every 15s to keep connection alive (prevents proxy timeouts)
+    const heartbeat = setInterval(() => {
+      try { reply.raw.write(': keep-alive\n\n') } catch {}
+    }, 15_000)
+
+    // Wait for client disconnect
+    await new Promise((resolve) => request.raw.on('close', resolve))
+
+    // Cleanup
+    emitter.off(eventName, handler)
+    clearInterval(heartbeat)
+    try { reply.raw.end() } catch {}
+  })
 }
