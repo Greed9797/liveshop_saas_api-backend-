@@ -36,7 +36,8 @@ async function main() {
     '017_cabines_reservas_eventos.sql',
     '018_lives_analytics_indexes.sql',
     '019_asaas_integration.sql',
-    '020_asaas_integration_fixes.sql'
+    '020_asaas_integration_fixes.sql',
+    '021_tiktok_live_connector.sql'
   ]
 
   for (const migration of pendingMigrations) {
