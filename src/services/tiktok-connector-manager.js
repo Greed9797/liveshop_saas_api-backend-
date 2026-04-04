@@ -7,6 +7,7 @@ let _db = null
 let _log = null
 const _liveMap = new Map()       // Map<liveId, entry>
 const _emitter = new EventEmitter()
+_emitter.setMaxListeners(0) // Unlimited — SSE clients each add one listener per live, removed on disconnect
 
 const MAX_CONNECTORS = Number(process.env.TIKTOK_MAX_CONNECTORS ?? 20)
 const FLUSH_INTERVAL_MS = 30_000

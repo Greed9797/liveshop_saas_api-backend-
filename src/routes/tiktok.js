@@ -199,19 +199,22 @@ export async function tiktokRoutes(app) {
     const emitter = getEmitter()
     const eventName = `snapshot:${liveId}`
     const handler = (snapshot) => {
-      try {
+      if (!reply.raw.destroyed) {
         reply.raw.write(`data: ${JSON.stringify(snapshot)}\n\n`)
-      } catch {}
+      }
     }
     emitter.on(eventName, handler)
 
     // Heartbeat every 15s to keep connection alive (prevents proxy timeouts)
     const heartbeat = setInterval(() => {
-      try { reply.raw.write(': keep-alive\n\n') } catch {}
+      if (!reply.raw.destroyed) reply.raw.write(': keep-alive\n\n')
     }, 15_000)
 
     // Wait for client disconnect
-    await new Promise((resolve) => request.raw.on('close', resolve))
+    await new Promise((resolve) => {
+      request.raw.once('close', resolve)
+      request.raw.once('error', resolve)
+    })
 
     // Cleanup
     emitter.off(eventName, handler)
