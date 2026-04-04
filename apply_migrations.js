@@ -35,7 +35,8 @@ async function main() {
     '016_auditoria_implantacao.sql',
     '017_cabines_reservas_eventos.sql',
     '018_lives_analytics_indexes.sql',
-    '019_asaas_integration.sql'
+    '019_asaas_integration.sql',
+    '020_asaas_integration_fixes.sql'
   ]
 
   for (const migration of pendingMigrations) {
