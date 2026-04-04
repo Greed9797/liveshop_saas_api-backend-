@@ -72,78 +72,81 @@ export async function cabinesRoutes(app) {
    * o erro fica registrado em boletos.asaas_error para reprocessamento.
    */
   async function gerarBoletoRoyaltiesAsaas({ tenantId, liveId, clienteId, valor }) {
+    // Guard first — no DB access needed for this check
+    if (!valor || valor <= 0) return
+
     const idempotencyKey = gerarIdempotencyKey(tenantId, liveId, 'royalties')
 
-    // Idempotência: já existe boleto para esta live?
-    const { rows: existing } = await app.db.query(
-      `SELECT id FROM boletos WHERE idempotency_key = $1`,
-      [idempotencyKey]
-    )
-    if (existing.length > 0) return
-
-    // Sem valor → não gerar boleto
-    if (valor <= 0) return
-
-    // Vencimento: 7 dias
-    const vencimento = new Date()
-    vencimento.setDate(vencimento.getDate() + 7)
-    const vencimentoStr = vencimento.toISOString().split('T')[0]
-
-    // Inserir boleto pendente (persiste mesmo se Asaas falhar)
-    const { rows: [boleto] } = await app.db.query(
-      `INSERT INTO boletos
-         (tenant_id, tipo, valor, vencimento, status,
-          idempotency_key, live_id, gerado_automaticamente, competencia)
-       VALUES ($1, 'royalties', $2, $3, 'pendente', $4, $5, true, DATE_TRUNC('month', NOW()))
-       RETURNING id`,
-      [tenantId, valor, vencimentoStr, idempotencyKey, liveId]
-    )
-
-    // Buscar dados do cliente para o Asaas
-    const { rows: [cliente] } = await app.db.query(
-      `SELECT nome, cpf, cnpj, email, celular, asaas_customer_id
-       FROM clientes WHERE id = $1`,
-      [clienteId]
-    )
-
-    if (!cliente) return
+    // Acquire RLS-aware client (sets app.tenant_id so RLS policies work)
+    const db = await app.dbTenant(tenantId)
 
     try {
-      let asaasCustomerId = cliente.asaas_customer_id
-      if (!asaasCustomerId) {
-        asaasCustomerId = await buscarOuCriarCustomer({
-          nome: cliente.nome,
-          cpfCnpj: cliente.cpf || cliente.cnpj,
-          email: cliente.email,
-          celular: cliente.celular,
+      // Vencimento: 7 dias
+      const vencimento = new Date()
+      vencimento.setDate(vencimento.getDate() + 7)
+      const vencimentoStr = vencimento.toISOString().split('T')[0]
+
+      // Atomic INSERT — ON CONFLICT handles idempotency without a separate SELECT
+      const { rows: [boleto] } = await db.query(
+        `INSERT INTO boletos
+           (tenant_id, tipo, valor, vencimento, status,
+            idempotency_key, live_id, gerado_automaticamente, competencia)
+         VALUES ($1, 'royalties', $2, $3, 'pendente', $4, $5, true, DATE_TRUNC('month', NOW()))
+         ON CONFLICT (idempotency_key) DO NOTHING
+         RETURNING id`,
+        [tenantId, valor, vencimentoStr, idempotencyKey, liveId]
+      )
+
+      // ON CONFLICT DO NOTHING returns no rows if it already existed → skip
+      if (!boleto) return
+
+      // Buscar dados do cliente
+      const { rows: [cliente] } = await db.query(
+        `SELECT nome, cpf, cnpj, email, celular, asaas_customer_id
+         FROM clientes WHERE id = $1`,
+        [clienteId]
+      )
+      if (!cliente) return
+
+      try {
+        let asaasCustomerId = cliente.asaas_customer_id
+        if (!asaasCustomerId) {
+          asaasCustomerId = await buscarOuCriarCustomer({
+            nome: cliente.nome,
+            cpfCnpj: cliente.cpf || cliente.cnpj,
+            email: cliente.email,
+            celular: cliente.celular,
+          })
+          await db.query(
+            `UPDATE clientes SET asaas_customer_id = $1 WHERE id = $2`,
+            [asaasCustomerId, clienteId]
+          )
+        }
+
+        const payment = await criarCobranca({
+          asaasCustomerId,
+          valor,
+          vencimento: vencimentoStr,
+          descricao: `Royalties Live ${liveId.slice(0, 8)} – ${new Date().toLocaleDateString('pt-BR')}`,
+          externalReference: boleto.id,
+          billingType: 'BOLETO',
         })
-        await app.db.query(
-          `UPDATE clientes SET asaas_customer_id = $1 WHERE id = $2`,
-          [asaasCustomerId, clienteId]
+
+        await db.query(
+          `UPDATE boletos
+           SET asaas_id = $1, asaas_url = $2, asaas_pix_copia_cola = $3
+           WHERE id = $4`,
+          [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boleto.id]
         )
+      } catch (err) {
+        await db.query(
+          `UPDATE boletos SET asaas_error = $1 WHERE id = $2`,
+          [err.message, boleto.id]
+        )
+        app.log.error({ err, liveId }, 'Falha ao criar cobrança Asaas')
       }
-
-      const payment = await criarCobranca({
-        asaasCustomerId,
-        valor,
-        vencimento: vencimentoStr,
-        descricao: `Royalties Live ${liveId.slice(0, 8)} – ${new Date().toLocaleDateString('pt-BR')}`,
-        externalReference: boleto.id,
-        billingType: 'BOLETO',
-      })
-
-      await app.db.query(
-        `UPDATE boletos
-         SET asaas_id = $1, asaas_url = $2, asaas_pix_copia_cola = $3
-         WHERE id = $4`,
-        [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boleto.id]
-      )
-    } catch (err) {
-      await app.db.query(
-        `UPDATE boletos SET asaas_error = $1 WHERE id = $2`,
-        [err.message, boleto.id]
-      )
-      app.log.error({ err, liveId }, 'Falha ao criar cobrança Asaas')
+    } finally {
+      db.release()
     }
   }
 
