@@ -1,0 +1,244 @@
+// src/services/tiktok-connector-manager.js
+import EventEmitter from 'node:events'
+import { WebcastPushConnection } from 'tiktok-live-connector'
+
+// ── Singleton state ───────────────────────────────────────────────────────────
+let _db = null
+let _log = null
+const _liveMap = new Map()       // Map<liveId, entry>
+const _emitter = new EventEmitter()
+
+const MAX_CONNECTORS = Number(process.env.TIKTOK_MAX_CONNECTORS ?? 20)
+const FLUSH_INTERVAL_MS = 30_000
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+export function init({ db, log }) {
+  _db = db
+  _log = log
+}
+
+export function getEmitter() {
+  return _emitter
+}
+
+export function has(liveId) {
+  return _liveMap.has(liveId)
+}
+
+/**
+ * Reconciliation loop — called by cron every 60s.
+ * Diff between in-memory Map and ao_vivo lives in DB.
+ * Starts missing connectors, stops stale ones.
+ */
+export async function syncLives() {
+  if (!_db) return
+
+  const { rows: activeLives } = await _db.query(`
+    SELECT l.id, l.tenant_id, ct.tiktok_username
+    FROM lives l
+    JOIN cabines c ON c.live_atual_id = l.id
+    JOIN contratos ct ON ct.id = c.contrato_id
+    WHERE l.status = 'em_andamento'
+      AND ct.tiktok_username IS NOT NULL
+  `)
+
+  const activeIds = new Set(activeLives.map(r => r.id))
+
+  // Stop connectors for lives that are no longer active
+  for (const [liveId] of _liveMap) {
+    if (!activeIds.has(liveId)) {
+      await stopConnector(liveId)
+    }
+  }
+
+  // Start connectors for active lives without one
+  for (const live of activeLives) {
+    if (!_liveMap.has(live.id)) {
+      await startConnector(live.id, live.tenant_id, live.tiktok_username)
+    }
+  }
+}
+
+/**
+ * Stops connector and does final flush.
+ */
+export async function stopConnector(liveId) {
+  const entry = _liveMap.get(liveId)
+  if (!entry) return
+
+  clearInterval(entry.flushTimer)
+  await _flushToDb(liveId, entry)
+
+  try {
+    await entry.connection.disconnect()
+  } catch (err) {
+    _log?.warn({ err, liveId }, 'tiktokManager: erro ao desconectar connector')
+  }
+
+  _liveMap.delete(liveId)
+  _log?.info({ liveId }, 'tiktokManager: connector parado')
+}
+
+// ── Test reset ────────────────────────────────────────────────────────────────
+export function _resetForTests() {
+  for (const [liveId, entry] of _liveMap) {
+    clearInterval(entry.flushTimer)
+    try { entry.connection.disconnect() } catch {}
+  }
+  _liveMap.clear()
+  _db = null
+  _log = null
+  _emitter.removeAllListeners()
+}
+
+// ── Internals ─────────────────────────────────────────────────────────────────
+
+async function startConnector(liveId, tenantId, username) {
+  if (_liveMap.size >= MAX_CONNECTORS) {
+    _log?.warn({ liveId, MAX_CONNECTORS }, 'tiktokManager: limite de connectors atingido')
+    return
+  }
+
+  // Cache live products for keyword matching on order detection
+  let produtos = []
+  try {
+    const { rows } = await _db.query(
+      `SELECT produto_nome, valor_unit FROM live_products WHERE live_id = $1 AND tenant_id = $2`,
+      [liveId, tenantId]
+    )
+    produtos = rows
+  } catch (err) {
+    _log?.warn({ err, liveId }, 'tiktokManager: falha ao carregar produtos da live')
+  }
+
+  const state = {
+    viewer_count: 0,
+    total_viewers: 0,
+    total_orders: 0,
+    gmv: 0,
+    likes_count: 0,
+    comments_count: 0,
+    dirty: false,
+    lastFlush: Date.now(),
+  }
+
+  const connection = new WebcastPushConnection(username)
+
+  // ── Event handlers ────────────────────────────────────────────────────────
+  connection.on('roomUser', (data) => {
+    state.viewer_count = data.viewerCount ?? state.viewer_count
+    state.total_viewers = Math.max(state.total_viewers, state.viewer_count)
+    state.dirty = true
+  })
+
+  connection.on('like', (data) => {
+    state.likes_count += (data.likeCount ?? 1)
+    state.dirty = true
+  })
+
+  connection.on('social', () => {
+    state.likes_count += 1
+    state.dirty = true
+  })
+
+  connection.on('chat', async (data) => {
+    state.comments_count += 1
+    state.dirty = true
+
+    // Keyword matching to detect orders (e.g. "quero o kit 01")
+    const comment = (data.comment ?? '').toLowerCase()
+    if (!comment.includes('quero')) return
+
+    const matched = produtos.find(p =>
+      comment.includes(p.produto_nome.toLowerCase())
+    )
+    if (!matched) return
+
+    state.total_orders += 1
+    state.gmv += Number(matched.valor_unit)
+    state.dirty = true
+
+    // Immediate dual-write to live_products
+    try {
+      await _db.query(
+        `UPDATE live_products
+         SET quantidade = quantidade + 1,
+             valor_total = valor_total + $1
+         WHERE live_id = $2 AND tenant_id = $3 AND produto_nome ILIKE $4`,
+        [matched.valor_unit, liveId, tenantId, matched.produto_nome]
+      )
+    } catch (err) {
+      _log?.error({ err, liveId }, 'tiktokManager: erro ao atualizar live_products')
+    }
+  })
+
+  connection.on('disconnected', () => {
+    _log?.warn({ liveId, username }, 'tiktokManager: connector desconectado — cron reconectará')
+    const entry = _liveMap.get(liveId)
+    if (entry) entry.reconnecting = true
+  })
+
+  connection.on('error', (err) => {
+    _log?.warn({ err, liveId, username }, 'tiktokManager: erro no connector')
+  })
+  // ─────────────────────────────────────────────────────────────────────────
+
+  const flushTimer = setInterval(async () => {
+    const entry = _liveMap.get(liveId)
+    if (entry) await _flushToDb(liveId, entry)
+  }, FLUSH_INTERVAL_MS)
+
+  _liveMap.set(liveId, {
+    connection,
+    tenantId,
+    username,
+    produtos,
+    state,
+    flushTimer,
+    reconnecting: false,
+  })
+
+  // Connect non-blocking — errors handled via 'error' event
+  connection.connect().catch(err => {
+    _log?.warn({ err, liveId, username }, 'tiktokManager: falha ao conectar — cron tentará novamente')
+    clearInterval(flushTimer)
+    _liveMap.delete(liveId)
+  })
+
+  _log?.info({ liveId, username }, 'tiktokManager: connector iniciado')
+}
+
+async function _flushToDb(liveId, entry) {
+  const { state, tenantId } = entry
+  if (!state.dirty) return
+
+  try {
+    await _db.query(
+      `INSERT INTO live_snapshots
+         (live_id, tenant_id, viewer_count, total_viewers, total_orders,
+          gmv, likes_count, comments_count, captured_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+      [
+        liveId, tenantId,
+        state.viewer_count, state.total_viewers, state.total_orders,
+        state.gmv, state.likes_count, state.comments_count,
+      ]
+    )
+
+    state.dirty = false
+    state.lastFlush = Date.now()
+
+    // Notify SSE handlers
+    _emitter.emit(`snapshot:${liveId}`, {
+      viewer_count:   state.viewer_count,
+      total_viewers:  state.total_viewers,
+      total_orders:   state.total_orders,
+      gmv:            state.gmv,
+      likes_count:    state.likes_count,
+      comments_count: state.comments_count,
+    })
+  } catch (err) {
+    _log?.error({ err, liveId }, 'tiktokManager: falha no flush — estado preservado em memória')
+  }
+}
