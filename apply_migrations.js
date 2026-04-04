@@ -1,30 +1,49 @@
-import fs from 'fs'
 import pg from 'pg'
+import fs from 'fs'
+import path from 'path'
 import 'dotenv/config'
 
-const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } })
+const pool = new pg.Pool({ 
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+})
 
-async function run() {
+async function runMigration(fileName) {
+  const filePath = path.join(process.cwd(), 'migrations', fileName)
+  if (!fs.existsSync(filePath)) {
+    console.log(`Migration ignorada (não encontrada): ${fileName}`)
+    return
+  }
+
+  const sql = fs.readFileSync(filePath, 'utf8')
   try {
-    const file12 = fs.readFileSync('./migrations/012_add_tiktok_tokens_to_tenants.sql', 'utf8')
-    const file13 = fs.readFileSync('./migrations/013_create_live_snapshots.sql', 'utf8')
-    const file14 = fs.readFileSync('./migrations/014_create_live_products.sql', 'utf8')
-    
-    console.log('Rodando migration 012...')
-    await pool.query(file12)
-    
-    console.log('Rodando migration 013...')
-    await pool.query(file13)
-    
-    console.log('Rodando migration 014...')
-    await pool.query(file14)
-    
-    console.log('Migrações aplicadas com sucesso!')
+    console.log(`Aplicando ${fileName}...`)
+    await pool.query(sql)
+    console.log(`✅ ${fileName} aplicada com sucesso!`)
   } catch (err) {
-    console.error('Erro ao rodar migrações:', err)
-  } finally {
-    await pool.end()
+    console.error(`❌ Erro ao aplicar ${fileName}:`, err.message)
+    // Continua para a próxima para não travar o script inteiro, 
+    // útil se a tabela já existir (idempotência falha em alguns casos do SQL original).
   }
 }
 
-run()
+async function main() {
+  console.log('Iniciando atualização do banco de dados (Migrations)...')
+  
+  // Vamos garantir as últimas migrations do SaaS
+  const pendingMigrations = [
+    '016_auditoria_implantacao.sql',
+    '017_cabines_reservas_eventos.sql',
+    '018_lives_analytics_indexes.sql',
+    '019_asaas_integration.sql'
+  ]
+
+  for (const migration of pendingMigrations) {
+    await runMigration(migration)
+  }
+
+  console.log('\nProcesso de migrations finalizado.')
+  await pool.end()
+}
+
+main()
