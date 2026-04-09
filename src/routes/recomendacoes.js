@@ -31,17 +31,23 @@ export async function recomendacoesRoutes(app) {
     const { tenant_id } = request.user
     const { nome_indicado, recomendante, lat, lng } = parsed.data
 
-    const result = await app.db.query(
-      `INSERT INTO recomendacoes (tenant_id, nome_indicado, recomendante, lat, lng)
-       VALUES ($1,$2,$3,$4,$5) RETURNING id, nome_indicado, status`,
-      [tenant_id, nome_indicado, recomendante, lat ?? null, lng ?? null]
-    )
-    return reply.code(201).send(result.rows[0])
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `INSERT INTO recomendacoes (tenant_id, nome_indicado, recomendante, lat, lng)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id, nome_indicado, status`,
+        [tenant_id, nome_indicado, recomendante, lat ?? null, lng ?? null]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally {
+      db.release()
+    }
   })
 
   // PATCH /v1/recomendacoes/:id/converter
   app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.authenticate }, async (request, reply) => {
     const { tenant_id } = request.user
+    const { cliente_id } = request.body || {}
     const db = await app.dbTenant(tenant_id)
     try {
       const recQ = await db.query(
@@ -50,13 +56,23 @@ export async function recomendacoesRoutes(app) {
       const rec = recQ.rows[0]
       if (!rec) return reply.code(400).send({ error: 'Recomendação não encontrada ou já convertida' })
 
-      // Cria cliente
-      const clienteQ = await db.query(
-        `INSERT INTO clientes (tenant_id, nome, celular, lat, lng)
-         VALUES ($1, $2, '', $3, $4) RETURNING id`,
-        [tenant_id, rec.nome_indicado, rec.lat, rec.lng]
-      )
-      const cliente_id = clienteQ.rows[0].id
+      let finalClienteId = cliente_id
+
+      if (!finalClienteId) {
+        // Cria cliente novo
+        const clienteQ = await db.query(
+          `INSERT INTO clientes (tenant_id, nome, celular, lat, lng)
+           VALUES ($1, $2, '', $3, $4) RETURNING id`,
+          [tenant_id, rec.nome_indicado, rec.lat, rec.lng]
+        )
+        finalClienteId = clienteQ.rows[0].id
+      } else {
+        // Valida se o cliente existe e pertence ao tenant
+        const checkQ = await db.query(`SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2`, [finalClienteId, tenant_id])
+        if (checkQ.rowCount === 0) {
+          return reply.code(400).send({ error: 'Cliente selecionado inválido ou inexistente neste tenant' })
+        }
+      }
 
       // Marca recomendação como convertida
       await db.query(
@@ -64,7 +80,7 @@ export async function recomendacoesRoutes(app) {
         [request.params.id]
       )
 
-      return { cliente_id }
+      return { cliente_id: finalClienteId }
     } finally {
       db.release()
     }

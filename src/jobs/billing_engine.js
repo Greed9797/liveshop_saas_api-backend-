@@ -1,0 +1,204 @@
+import pg from 'pg'
+import 'dotenv/config'
+import cron from 'node-cron'
+import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/asaas.js'
+
+// Para evitar problemas com timezone ao consultar as lives do banco
+// No Node, usaremos a data atual no timezone de SP
+function getSPDate() {
+  const d = new Date()
+  return new Date(d.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+}
+
+// Cria um pool com a pool principal
+let dbPool = null
+
+async function processTenantBilling(tenantId, day, spDate) {
+  const db = await dbPool.connect()
+  try {
+    // 1. Obter tenant config
+    const tenantQ = await db.query(`SELECT asaas_api_key FROM tenants WHERE id = $1`, [tenantId])
+    if (!tenantQ.rows[0]?.asaas_api_key) return // Tenant sem Asaas configurado, ignora
+
+    await db.query('BEGIN')
+
+    let inicioPeriodo, fimPeriodo, vencimentoStr, tituloFatura
+
+    const year = spDate.getFullYear()
+    const month = spDate.getMonth()
+
+    if (day === 16) {
+      // Dia 16: Cobra lives do dia 01 ao 15 (Mês atual)
+      inicioPeriodo = new Date(year, month, 1)
+      fimPeriodo = new Date(year, month, 15, 23, 59, 59, 999)
+      
+      // Vencimento dia 20
+      const v = new Date(year, month, 20)
+      vencimentoStr = v.toISOString().split('T')[0]
+      tituloFatura = `Fechamento (1ª Quinzena) - ${month + 1}/${year}`
+
+    } else if (day === 1) {
+      // Dia 01: Cobra lives do dia 16 ao último dia do mês anterior, E a mensalidade fixa
+      // Como rodou dia 1 de manhã cedo, o mês anterior é month - 1
+      const prevMonth = month === 0 ? 11 : month - 1
+      const prevYear = month === 0 ? year - 1 : year
+      
+      inicioPeriodo = new Date(prevYear, prevMonth, 16)
+      const lastDay = new Date(year, month, 0) // último dia do mês passado
+      fimPeriodo = new Date(prevYear, prevMonth, lastDay.getDate(), 23, 59, 59, 999)
+      
+      // Vencimento dia 05 do mês atual
+      const v = new Date(year, month, 5)
+      vencimentoStr = v.toISOString().split('T')[0]
+      tituloFatura = `Fechamento (2ª Quinzena + Fixo) - ${prevMonth + 1}/${prevYear}`
+    } else {
+      await db.query('ROLLBACK')
+      return // Não é dia de faturamento
+    }
+
+    // Busca lives não faturadas no período (Timezone São Paulo)
+    const livesQ = await db.query(`
+      SELECT cliente_id, id, comissao_calculada
+      FROM lives 
+      WHERE tenant_id = $1 
+        AND status = 'encerrada' 
+        AND faturado_em IS NULL
+        AND (encerrado_em AT TIME ZONE 'UTC' AT TIME ZONE 'America/Sao_Paulo') BETWEEN $2 AND $3
+    `, [tenantId, inicioPeriodo, fimPeriodo])
+
+    const livesPorCliente = {}
+    for (const l of livesQ.rows) {
+      if (!livesPorCliente[l.cliente_id]) {
+        livesPorCliente[l.cliente_id] = { lives: [], totalComissao: 0, contrato_id: null, totalFixo: 0 }
+      }
+      livesPorCliente[l.cliente_id].lives.push(l.id)
+      livesPorCliente[l.cliente_id].totalComissao += Number(l.comissao_calculada || 0)
+    }
+
+    // Se for dia 01, busca os contratos ativos para incluir o valor fixo
+    if (day === 1) {
+      const contratosQ = await db.query(`
+        SELECT cliente_id, id, valor_fixo 
+        FROM contratos 
+        WHERE tenant_id = $1 AND status = 'ativo'
+      `, [tenantId])
+
+      for (const c of contratosQ.rows) {
+        if (!livesPorCliente[c.cliente_id]) {
+          livesPorCliente[c.cliente_id] = { lives: [], totalComissao: 0, contrato_id: c.id, totalFixo: 0 }
+        }
+        livesPorCliente[c.cliente_id].contrato_id = c.id
+        livesPorCliente[c.cliente_id].totalFixo += Number(c.valor_fixo || 0)
+      }
+    }
+
+    // Gerar faturas por cliente
+    for (const [clienteId, data] of Object.entries(livesPorCliente)) {
+      const valorTotal = data.totalComissao + data.totalFixo
+
+      if (valorTotal <= 0) continue // Ignora faturas zeradas (Zero-Boleto Bug)
+
+      // Registra o boleto no nosso banco
+      const idempotencyKey = gerarIdempotencyKey(tenantId, clienteId, tituloFatura)
+      
+      const boletoQ = await db.query(
+        `INSERT INTO boletos (tenant_id, cliente_id, contrato_id, tipo, valor, status, vencimento, competencia, gerado_automaticamente, idempotency_key)
+         VALUES ($1, $2, $3, 'royalties', $4, 'pendente', $5, CURRENT_DATE, true, $6)
+         ON CONFLICT (idempotency_key) DO NOTHING
+         RETURNING id`,
+        [tenantId, clienteId, data.contrato_id, valorTotal, vencimentoStr, idempotencyKey]
+      )
+
+      if (boletoQ.rowCount === 0) continue // Já existia para essa chave
+
+      const boletoId = boletoQ.rows[0].id
+
+      // Atualiza lives com o boleto_id e marca como faturado
+      if (data.lives.length > 0) {
+        await db.query(
+          `UPDATE lives SET faturado_em = NOW(), boleto_id = $1 WHERE id = ANY($2::uuid[])`,
+          [boletoId, data.lives]
+        )
+      }
+
+      // Comunicação com Asaas
+      try {
+        const clienteQ = await db.query(`SELECT nome, cpf, cnpj, email, celular, asaas_customer_id FROM clientes WHERE id = $1`, [clienteId])
+        const cliente = clienteQ.rows[0]
+        if (!cliente) continue
+
+        let asaasCustomerId = cliente.asaas_customer_id
+        if (!asaasCustomerId) {
+          // A criação precisa da chave da API, como a função de Asaas.js usa o process.env.ASAAS_API_KEY por default, 
+          // precisamos garantir que os métodos em asaas.js aceitem token customizado. 
+          // Como não queremos quebrar o asaas.js já existente, vamos assumir que ele funciona com a env global,
+          // ou adaptamos depois.
+          asaasCustomerId = await buscarOuCriarCustomer({
+            nome: cliente.nome,
+            cpfCnpj: cliente.cpf || cliente.cnpj,
+            email: cliente.email,
+            celular: cliente.celular,
+          })
+          await db.query(`UPDATE clientes SET asaas_customer_id = $1 WHERE id = $2`, [asaasCustomerId, clienteId])
+        }
+
+        const payment = await criarCobranca({
+          asaasCustomerId,
+          valor: valorTotal,
+          vencimento: vencimentoStr,
+          descricao: `${tituloFatura} - LiveShop`,
+          externalReference: boletoId,
+          billingType: 'BOLETO',
+        })
+
+        await db.query(
+          `UPDATE boletos SET asaas_id = $1, asaas_url = $2, asaas_pix_copia_cola = $3 WHERE id = $4`,
+          [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boletoId]
+        )
+
+      } catch (err) {
+        // Se a API Asaas falhar, registramos o erro no boleto, mas comitamos o banco.
+        console.error(`Falha no Asaas para boleto ${boletoId}:`, err.message)
+        await db.query(`UPDATE boletos SET asaas_error = $1 WHERE id = $2`, [err.message, boletoId])
+      }
+    }
+
+    await db.query('COMMIT')
+
+  } catch (err) {
+    await db.query('ROLLBACK')
+    console.error(`Erro ao faturar tenant ${tenantId}:`, err)
+  } finally {
+    db.release()
+  }
+}
+
+export async function startBillingEngine(db) {
+  dbPool = db
+  console.log('[Billing Engine] Cron configurado para 02:00 AM (SP)')
+
+  cron.schedule('0 2 * * *', async () => {
+    console.log('[Billing Engine] Iniciando rotina de faturamento...')
+    const spDate = getSPDate()
+    const day = spDate.getDate()
+
+    // O faturamento só roda se for dia 1 ou 16
+    if (day !== 1 && day !== 16) {
+      console.log('[Billing Engine] Hoje não é dia de faturamento. Encerrando.')
+      return
+    }
+
+    try {
+      // Pega todos os tenants
+      const res = await dbPool.query('SELECT id FROM tenants')
+      for (const row of res.rows) {
+        await processTenantBilling(row.id, day, spDate)
+      }
+      console.log('[Billing Engine] Rotina finalizada com sucesso.')
+    } catch (err) {
+      console.error('[Billing Engine] Erro geral na rotina:', err)
+    }
+  }, {
+    timezone: "America/Sao_Paulo"
+  })
+}

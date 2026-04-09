@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { buscarOuCriarCustomer, gerarIdempotencyKey, criarCobranca } from '../services/asaas.js'
 import { has as managerHas, stopConnector } from '../services/tiktok-connector-manager.js'
 
 const cabineRoleAccess = (app) => [
@@ -67,89 +66,6 @@ async function logCabineEvent(db, {
 }
 
 export async function cabinesRoutes(app) {
-  /**
-   * Gera boleto de royalties no Asaas ao encerrar live.
-   * Fire-and-forget: falha silenciosa — a live já está encerrada,
-   * o erro fica registrado em boletos.asaas_error para reprocessamento.
-   */
-  async function gerarBoletoRoyaltiesAsaas({ tenantId, liveId, clienteId, valor }) {
-    // Guard first — no DB access needed for this check
-    if (!valor || valor <= 0) return
-
-    const idempotencyKey = gerarIdempotencyKey(tenantId, liveId, 'royalties')
-
-    // Acquire RLS-aware client (sets app.tenant_id so RLS policies work)
-    const db = await app.dbTenant(tenantId)
-
-    try {
-      // Vencimento: 7 dias
-      const vencimento = new Date()
-      vencimento.setDate(vencimento.getDate() + 7)
-      const vencimentoStr = vencimento.toISOString().split('T')[0]
-
-      // Atomic INSERT — ON CONFLICT handles idempotency without a separate SELECT
-      const { rows: [boleto] } = await db.query(
-        `INSERT INTO boletos
-           (tenant_id, tipo, valor, vencimento, status,
-            idempotency_key, live_id, gerado_automaticamente, competencia)
-         VALUES ($1, 'royalties', $2, $3, 'pendente', $4, $5, true, DATE_TRUNC('month', NOW()))
-         ON CONFLICT (idempotency_key) DO NOTHING
-         RETURNING id`,
-        [tenantId, valor, vencimentoStr, idempotencyKey, liveId]
-      )
-
-      // ON CONFLICT DO NOTHING returns no rows if it already existed → skip
-      if (!boleto) return
-
-      // Buscar dados do cliente
-      const { rows: [cliente] } = await db.query(
-        `SELECT nome, cpf, cnpj, email, celular, asaas_customer_id
-         FROM clientes WHERE id = $1`,
-        [clienteId]
-      )
-      if (!cliente) return
-
-      try {
-        let asaasCustomerId = cliente.asaas_customer_id
-        if (!asaasCustomerId) {
-          asaasCustomerId = await buscarOuCriarCustomer({
-            nome: cliente.nome,
-            cpfCnpj: cliente.cpf || cliente.cnpj,
-            email: cliente.email,
-            celular: cliente.celular,
-          })
-          await db.query(
-            `UPDATE clientes SET asaas_customer_id = $1 WHERE id = $2`,
-            [asaasCustomerId, clienteId]
-          )
-        }
-
-        const payment = await criarCobranca({
-          asaasCustomerId,
-          valor,
-          vencimento: vencimentoStr,
-          descricao: `Royalties Live ${liveId.slice(0, 8)} – ${new Date().toLocaleDateString('pt-BR')}`,
-          externalReference: boleto.id,
-          billingType: 'BOLETO',
-        })
-
-        await db.query(
-          `UPDATE boletos
-           SET asaas_id = $1, asaas_url = $2, asaas_pix_copia_cola = $3
-           WHERE id = $4`,
-          [payment.id, payment.invoiceUrl, payment.pixCopiaECola ?? null, boleto.id]
-        )
-      } catch (err) {
-        await db.query(
-          `UPDATE boletos SET asaas_error = $1 WHERE id = $2`,
-          [err.message, boleto.id]
-        )
-        app.log.error({ err, liveId }, 'Falha ao criar cobrança Asaas')
-      }
-    } finally {
-      db.release()
-    }
-  }
 
   // GET /v1/cabines
   app.get('/v1/cabines', { preHandler: cabineRoleAccess(app) }, async (request) => {
@@ -180,7 +96,11 @@ export async function cabinesRoutes(app) {
          ORDER BY c.numero`
       )
 
-      return result.rows
+      return result.rows.map(c => ({
+        ...c,
+        viewer_count: Number(c.viewer_count ?? 0),
+        gmv_atual: Number(c.gmv_atual ?? 0),
+      }))
     } finally {
       db.release()
     }
@@ -213,7 +133,11 @@ export async function cabinesRoutes(app) {
          ORDER BY ct.ativado_em DESC NULLS LAST, ct.criado_em DESC`
       )
 
-      return result.rows
+      return result.rows.map(r => ({
+        ...r,
+        valor_fixo: Number(r.valor_fixo ?? 0),
+        comissao_pct: Number(r.comissao_pct ?? 0),
+      }))
     } finally {
       db.release()
     }
@@ -830,12 +754,6 @@ export async function cabinesRoutes(app) {
 
         // Gerar cobrança automática de royalties (fire-and-forget)
         if (comissao > 0) {
-          gerarBoletoRoyaltiesAsaas({
-            tenantId: tenant_id,
-            liveId: live.id,
-            clienteId: live.cliente_id,
-            valor: comissao,
-          }).catch(err => app.log.error({ err }, 'gerarBoletoRoyaltiesAsaas: erro inesperado'))
         }
 
         // Parar connector TikTok e fazer flush final do snapshot (fire-and-forget)

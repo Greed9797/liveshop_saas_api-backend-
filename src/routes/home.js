@@ -100,7 +100,7 @@ export async function homeRoutes(app) {
       // 4. Alertas
       const alertasQ = await db.query(`
         SELECT
-          (SELECT COUNT(*) FROM contratos WHERE status = 'analise') AS contratos_analise,
+          (SELECT COUNT(*) FROM contratos WHERE status = 'em_analise') AS contratos_analise,
           (SELECT COUNT(*) FROM boletos WHERE status IN ('vencido') OR (status = 'pendente' AND vencimento < NOW())) AS boletos_vencidos,
           (SELECT COUNT(*) FROM leads WHERE pego_por IS NULL AND status = 'disponivel') AS leads_disponiveis
       `)

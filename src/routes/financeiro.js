@@ -7,6 +7,8 @@ const custoSchema = z.object({
   competencia: z.string().regex(/^\d{4}-\d{2}(-\d{2})?$/, 'Formato: YYYY-MM ou YYYY-MM-DD'),
 })
 
+const toNum = (v) => Number(v ?? 0)
+
 export async function financeiroRoutes(app) {
   // GET /v1/financeiro/resumo?mes=&ano=
   app.get('/v1/financeiro/resumo', { preHandler: app.authenticate }, async (request) => {
@@ -42,9 +44,9 @@ export async function financeiroRoutes(app) {
       `, [periodo])
 
       const r = result.rows[0]
-      const fat_bruto  = Number(r.fat_bruto_fixo) + Number(r.fat_bruto_comissao)
-      const fat_liquido = Math.max(0, fat_bruto - Number(r.total_custos))
-      return { fat_bruto, fat_liquido, total_custos: Number(r.total_custos), periodo }
+      const fat_bruto  = toNum(r.fat_bruto_fixo) + toNum(r.fat_bruto_comissao)
+      const fat_liquido = Math.max(0, fat_bruto - toNum(r.total_custos))
+      return { fat_bruto, fat_liquido, total_custos: toNum(r.total_custos), periodo }
     } finally {
       db.release()
     }
@@ -67,7 +69,10 @@ export async function financeiroRoutes(app) {
         ORDER BY total DESC
       `, [periodo])
 
-      return { periodo, por_cliente: porCliente.rows }
+      return {
+        periodo,
+        por_cliente: porCliente.rows.map(r => ({ ...r, total: toNum(r.total) })),
+      }
     } finally {
       db.release()
     }
@@ -97,7 +102,11 @@ export async function financeiroRoutes(app) {
         GROUP BY 1 ORDER BY 1
       `, [periodo])
 
-      return { periodo, entradas: entradas.rows, saidas: saidas.rows }
+      return {
+        periodo,
+        entradas: entradas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
+        saidas:   saidas.rows.map(r => ({ ...r, valor: toNum(r.valor) })),
+      }
     } finally {
       db.release()
     }
@@ -116,7 +125,8 @@ export async function financeiroRoutes(app) {
        VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
       [tenant_id, descricao, valor, tipo, competencia]
     )
-    return reply.code(201).send(result.rows[0])
+    const row = result.rows[0]
+    return reply.code(201).send({ ...row, valor: toNum(row.valor) })
   })
 
   // GET /v1/financeiro/custos
@@ -132,7 +142,7 @@ export async function financeiroRoutes(app) {
          ORDER BY competencia DESC`,
         [mes]
       )
-      return result.rows
+      return result.rows.map(r => ({ ...r, valor: toNum(r.valor) }))
     } finally {
       db.release()
     }

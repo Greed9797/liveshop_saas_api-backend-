@@ -1,7 +1,70 @@
 import { validarWebhookToken } from '../services/asaas.js'
 
 export async function boletosRoutes(app) {
-  // GET /v1/boletos
+  
+  // GET /v1/boletos/alertas
+  app.get('/v1/boletos/alertas', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id, sub: user_id, papel } = request.user
+    const db = await app.dbTenant(tenant_id)
+    
+    try {
+      let extraFilter = ''
+      const values = [tenant_id]
+
+      if (papel === 'cliente_parceiro') {
+        const userQ = await db.query('SELECT email FROM users WHERE id = $1', [user_id])
+        const email = userQ.rows[0]?.email
+        const clienteQ = await db.query('SELECT id FROM clientes WHERE email = $1', [email])
+        const clienteId = clienteQ.rows[0]?.id
+        
+        if (clienteId) {
+          extraFilter = 'AND cliente_id = $2'
+          values.push(clienteId)
+        } else {
+          return null // Cliente parceiro sem cliente vinculado
+        }
+      }
+
+      // Busca um boleto criado nos ultimos 3 dias e nao notificado
+      const q = `
+        SELECT id, valor, vencimento, asaas_url, asaas_pix_copia_cola
+        FROM boletos 
+        WHERE tenant_id = $1 
+          AND status = 'pendente' 
+          AND notificado_em IS NULL 
+          AND criado_em > NOW() - INTERVAL '3 days'
+          ${extraFilter}
+        ORDER BY criado_em DESC
+        LIMIT 1
+      `
+
+      const res = await db.query(q, values)
+      const alerta = res.rows[0]
+      if (alerta) alerta.valor = Number(alerta.valor ?? 0)
+      return alerta || null
+
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/boletos/:id/visto
+  app.patch('/v1/boletos/:id/visto', { preHandler: app.authenticate }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    
+    try {
+      const res = await db.query(
+        `UPDATE boletos SET notificado_em = NOW() WHERE id = $1 AND tenant_id = $2`,
+        [request.params.id, tenant_id]
+      )
+      if (res.rowCount === 0) return reply.code(404).send({ error: 'Boleto não encontrado' })
+      return { ok: true }
+    } finally {
+      db.release()
+    }
+  })
+// GET /v1/boletos
   app.get('/v1/boletos', { preHandler: app.authenticate }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
@@ -16,7 +79,7 @@ export async function boletosRoutes(app) {
                 asaas_id, asaas_url, asaas_pix_copia_cola, gerado_automaticamente, asaas_error
          FROM boletos ORDER BY vencimento DESC`
       )
-      return result.rows
+      return result.rows.map(b => ({ ...b, valor: Number(b.valor ?? 0) }))
     } finally {
       db.release()
     }

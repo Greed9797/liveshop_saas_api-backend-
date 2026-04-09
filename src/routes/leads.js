@@ -1,23 +1,26 @@
 export async function leadsRoutes(app) {
+  const leadsAccess = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])]
+
   // GET /v1/leads
-  app.get('/v1/leads', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/leads', { preHandler: leadsAccess }, async (request) => {
     const { tenant_id } = request.user
     const result = await app.db.query(
       `SELECT id, nome, nicho, cidade, estado, lat, lng, fat_estimado,
               status, pego_por, pego_em, expira_em, criado_em,
               (NOW() - criado_em) < interval '24 hours' AS is_novo
-       FROM leads
-       WHERE status = 'disponivel' OR pego_por = $1
-       ORDER BY
-         CASE WHEN status = 'disponivel' THEN 0 ELSE 1 END,
-         criado_em DESC`,
+        FROM leads
+       WHERE franqueadora_id = $1
+         AND (status = 'disponivel' OR pego_por = $1)
+        ORDER BY
+          CASE WHEN status = 'disponivel' THEN 0 ELSE 1 END,
+          criado_em DESC`,
       [tenant_id]
     )
     return result.rows
   })
 
   // POST /v1/leads/:id/pegar
-  app.post('/v1/leads/:id/pegar', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/leads/:id/pegar', { preHandler: leadsAccess }, async (request, reply) => {
     const { tenant_id } = request.user
 
     // Usa transação com SELECT FOR UPDATE para evitar race condition
@@ -25,7 +28,10 @@ export async function leadsRoutes(app) {
     try {
       await client.query('BEGIN')
       const q = await client.query(
-        `SELECT id, status FROM leads WHERE id = $1 FOR UPDATE`, [request.params.id]
+        `SELECT id, status FROM leads
+         WHERE id = $1 AND franqueadora_id = $2
+         FOR UPDATE`,
+        [request.params.id, tenant_id]
       )
       const lead = q.rows[0]
       if (!lead) { await client.query('ROLLBACK'); return reply.code(404).send({ error: 'Lead não encontrado' }) }
@@ -48,7 +54,7 @@ export async function leadsRoutes(app) {
   })
 
   // GET /v1/leads/meus
-  app.get('/v1/leads/meus', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/leads/meus', { preHandler: leadsAccess }, async (request) => {
     const { tenant_id } = request.user
     const result = await app.db.query(
       `SELECT id, nome, nicho, cidade, estado, lat, lng, fat_estimado,

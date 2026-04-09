@@ -5,11 +5,15 @@ import { buildApp } from './app.js'
 import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
+import { startBillingEngine } from './jobs/billing_engine.js'
 
 const app = await buildApp()
 
 // Initialize ConnectorManager with pool access and logger
 connectorManager.init({ db: app.db, log: app.log })
+
+// Initialize Billing Engine for Batch Billing
+startBillingEngine(app.db)
 
 await app.listen({ port: Number(process.env.PORT ?? 3001), host: '0.0.0.0' })
 console.log(`LiveShop API rodando na porta ${process.env.PORT ?? 3001}`)

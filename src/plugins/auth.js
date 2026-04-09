@@ -32,7 +32,8 @@ async function authPlugin(app) {
 
     try {
       await request.jwtVerify()
-    } catch {
+    } catch (err) {
+      app.log.warn({ msg: err.message, code: err.code }, 'JWT verification failed')
       return reply.code(401).send({ error: 'Token inválido ou expirado' })
     }
   })

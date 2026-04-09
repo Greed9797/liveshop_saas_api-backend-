@@ -8,6 +8,9 @@ async function dbPlugin(app) {
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false },
+    max: 20,
+    idleTimeoutMillis: 30000,
+    connectionTimeoutMillis: 5000,
   })
 
   // Testa conexão na inicialização
@@ -24,7 +27,7 @@ async function dbPlugin(app) {
   // Decorator para queries com RLS (com tenant_id do JWT)
   app.decorate('dbTenant', async (tenantId) => {
     const client = await pool.connect()
-    await client.query(`SET app.tenant_id = '${tenantId}'`)
+    await client.query(`SELECT set_config('app.tenant_id', $1, false)`, [tenantId])
     return {
       query: (text, params) => client.query(text, params),
       release: () => client.release(),
