@@ -6,13 +6,17 @@ const createSchema = z.object({
   cpf:          z.string().optional(),
   cnpj:         z.string().optional(),
   razao_social: z.string().optional(),
-  email:        z.string().email().optional(),
+  email:        z.string().optional(),
   fat_anual:    z.number().default(0),
   nicho:        z.string().optional(),
   site:         z.string().optional(),
   vende_tiktok: z.boolean().default(false),
   lat:          z.number().optional(),
   lng:          z.number().optional(),
+  cep:          z.string().optional(),
+  cidade:       z.string().optional(),
+  estado:       z.string().optional(),
+  siga:         z.string().optional(),
 })
 
 export async function clientesRoutes(app) {
@@ -24,17 +28,21 @@ export async function clientesRoutes(app) {
     const { tenant_id } = request.user
     const d = parsed.data
 
-    const result = await app.db.query(
-      `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
-        fat_anual, nicho, site, vende_tiktok, lat, lng)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-       RETURNING id, status, criado_em`,
-      [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
-       d.razao_social ?? null, d.email ?? null, d.fat_anual,
-       d.nicho ?? null, d.site ?? null, d.vende_tiktok,
-       d.lat ?? null, d.lng ?? null]
-    )
-    return reply.code(201).send(result.rows[0])
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `INSERT INTO clientes (tenant_id, nome, celular, cpf, cnpj, razao_social, email,
+          fat_anual, nicho, site, vende_tiktok, lat, lng, cep, cidade, estado, siga)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         RETURNING *`,
+        [tenant_id, d.nome, d.celular, d.cpf ?? null, d.cnpj ?? null,
+         d.razao_social ?? null, d.email ?? null, d.fat_anual,
+         d.nicho ?? null, d.site ?? null, d.vende_tiktok,
+         d.lat ?? null, d.lng ?? null,
+         d.cep ?? null, d.cidade ?? null, d.estado ?? null, d.siga ?? null]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally { db.release() }
   })
 
   // GET /v1/clientes
@@ -44,7 +52,7 @@ export async function clientesRoutes(app) {
     try {
       const result = await db.query(
         `SELECT id, nome, celular, email, status, lat, lng, fat_anual, nicho,
-                score, criado_em
+                score, cep, cidade, estado, siga, criado_em
          FROM clientes ORDER BY criado_em DESC`
       )
       return result.rows

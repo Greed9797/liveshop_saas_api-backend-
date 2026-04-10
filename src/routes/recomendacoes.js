@@ -35,7 +35,7 @@ export async function recomendacoesRoutes(app) {
     try {
       const result = await db.query(
         `INSERT INTO recomendacoes (tenant_id, nome_indicado, recomendante, lat, lng)
-         VALUES ($1,$2,$3,$4,$5) RETURNING id, nome_indicado, status`,
+         VALUES ($1,$2,$3,$4,$5) RETURNING id, nome_indicado, recomendante, status, lat, lng`,
         [tenant_id, nome_indicado, recomendante, lat ?? null, lng ?? null]
       )
       return reply.code(201).send(result.rows[0])
@@ -47,7 +47,7 @@ export async function recomendacoesRoutes(app) {
   // PATCH /v1/recomendacoes/:id/converter
   app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.authenticate }, async (request, reply) => {
     const { tenant_id } = request.user
-    const { cliente_id } = request.body || {}
+    const { cliente_id, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng } = request.body || {}
     const db = await app.dbTenant(tenant_id)
     try {
       const recQ = await db.query(
@@ -59,28 +59,28 @@ export async function recomendacoesRoutes(app) {
       let finalClienteId = cliente_id
 
       if (!finalClienteId) {
-        // Cria cliente novo
         const clienteQ = await db.query(
-          `INSERT INTO clientes (tenant_id, nome, celular, lat, lng)
-           VALUES ($1, $2, '', $3, $4) RETURNING id`,
-          [tenant_id, rec.nome_indicado, rec.lat, rec.lng]
+          `INSERT INTO clientes (tenant_id, nome, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+          [tenant_id, rec.nome_indicado, celular ?? '', cnpj ?? null,
+           cep ?? null, cidade ?? null, estado ?? null,
+           fat_anual ?? 0, lat ?? rec.lat ?? null, lng ?? rec.lng ?? null]
         )
         finalClienteId = clienteQ.rows[0].id
-      } else {
-        // Valida se o cliente existe e pertence ao tenant
-        const checkQ = await db.query(`SELECT id FROM clientes WHERE id = $1 AND tenant_id = $2`, [finalClienteId, tenant_id])
-        if (checkQ.rowCount === 0) {
-          return reply.code(400).send({ error: 'Cliente selecionado inválido ou inexistente neste tenant' })
-        }
       }
 
-      // Marca recomendação como convertida
+      // Score de risco rápido
+      let score = 0
+      if ((fat_anual ?? 0) > 50000) score += 50
+      if (cnpj) score += 20
+      const altoRisco = score < 60
+
       await db.query(
         `UPDATE recomendacoes SET status = 'convertido', convertido_em = NOW() WHERE id = $1`,
         [request.params.id]
       )
 
-      return { cliente_id: finalClienteId }
+      return { cliente_id: finalClienteId, score, alto_risco: altoRisco }
     } finally {
       db.release()
     }

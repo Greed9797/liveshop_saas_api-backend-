@@ -15,12 +15,53 @@ export async function contratosRoutes(app) {
     const { tenant_id, sub } = request.user
     const { cliente_id, valor_fixo, comissao_pct } = parsed.data
 
-    const result = await app.db.query(
-      `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct)
-       VALUES ($1, $2, $3, $4, $5) RETURNING id, status, criado_em`,
-      [tenant_id, cliente_id, sub, valor_fixo, comissao_pct]
-    )
-    return reply.code(201).send(result.rows[0])
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id, status, criado_em`,
+        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally { db.release() }
+  })
+
+  // GET /v1/contratos — lista todos os contratos do tenant
+  app.get('/v1/contratos', { preHandler: app.authenticate }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(`
+        SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
+               c.de_risco, c.assinado_em, c.ativado_em, c.cancelado_em,
+               c.criado_em,
+               cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
+               cl.nicho AS cliente_nicho
+        FROM contratos c
+        JOIN clientes cl ON cl.id = c.cliente_id
+        ORDER BY c.criado_em DESC
+      `)
+      return result.rows
+    } finally { db.release() }
+  })
+
+  // GET /v1/contratos/:id — detalhe de um contrato
+  app.get('/v1/contratos/:id', { preHandler: app.authenticate }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(`
+        SELECT c.*, cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
+               cl.fat_anual AS cliente_fat_anual, cl.nicho AS cliente_nicho,
+               cl.score AS cliente_score, cl.email AS cliente_email,
+               cl.celular AS cliente_celular
+        FROM contratos c
+        JOIN clientes cl ON cl.id = c.cliente_id
+        WHERE c.id = $1
+      `, [request.params.id])
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      return result.rows[0]
+    } finally { db.release() }
   })
 
   // POST /v1/contratos/:id/assinar → em_analise
@@ -154,18 +195,58 @@ export async function contratosRoutes(app) {
 
   // PATCH /v1/contratos/:id/assumir-risco → ativo forçado
   app.patch('/v1/contratos/:id/assumir-risco', {
-    preHandler: app.requirePapel(['franqueador_master']),
+    preHandler: app.requirePapel(['franqueador_master', 'franqueado']),
   }, async (request, reply) => {
-    const { tenant_id } = request.user
+    const { confirmacao, senha } = request.body ?? {}
+    if (!confirmacao || confirmacao.toUpperCase() !== 'CONCORDO') {
+      return reply.code(400).send({ error: 'Confirmação inválida' })
+    }
+    if (!senha) {
+      return reply.code(400).send({ error: 'Senha é obrigatória' })
+    }
+
+    const { tenant_id, sub } = request.user
+
+    // Valida senha do usuário
+    const userQ = await app.db.query(
+      `SELECT senha_hash FROM users WHERE id = $1`, [sub]
+    )
+    if (!userQ.rows[0]) {
+      return reply.code(400).send({ error: 'Usuário não encontrado' })
+    }
+
+    const { default: bcrypt } = await import('bcrypt')
+    const senhaOk = await bcrypt.compare(senha, userQ.rows[0].senha_hash)
+    if (!senhaOk) {
+      return reply.code(400).send({ error: 'Senha inválida' })
+    }
+
     const db = await app.dbTenant(tenant_id)
     try {
-      const result = await db.query(
-        `UPDATE contratos SET de_risco = true, status = 'ativo', ativado_em = NOW()
-         WHERE id = $1 RETURNING id, status, de_risco`,
-        [request.params.id]
-      )
-      if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
-      return result.rows[0]
+      await db.query('BEGIN')
+      try {
+        const result = await db.query(
+          `UPDATE contratos SET de_risco = true, is_risco_franqueado = true,
+                  status = 'ativo', ativado_em = NOW(), risco_assumido_em = NOW()
+           WHERE id = $1 AND status IN ('em_analise', 'cancelado')
+           RETURNING id, cliente_id, status, de_risco`,
+          [request.params.id]
+        )
+        if (!result.rows[0]) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'Contrato não encontrado ou não está em análise' })
+        }
+
+        await db.query(
+          `UPDATE clientes SET status = 'ativo' WHERE id = $1`,
+          [result.rows[0].cliente_id]
+        )
+        await db.query('COMMIT')
+      } catch (txErr) {
+        await db.query('ROLLBACK')
+        throw txErr
+      }
+      return { ok: true, status: 'ativo', de_risco: true }
     } finally {
       db.release()
     }
@@ -268,6 +349,46 @@ export async function contratosRoutes(app) {
     } finally {
       db.release()
     }
+  })
+
+  // PATCH /v1/contratos/:id/pendencia
+  app.patch('/v1/contratos/:id/pendencia', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const motivo = request.body?.motivo
+    if (!motivo || motivo.length < 8) {
+      return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
+    }
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE contratos SET pendencia_motivo = $2, reviewed_at = NOW()
+         WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
+        [request.params.id, motivo]
+      )
+      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
+      return result.rows[0]
+    } finally { db.release() }
+  })
+
+  // PATCH /v1/contratos/:id/reprovar
+  app.patch('/v1/contratos/:id/reprovar', {
+    preHandler: app.requirePapel(['franqueador_master']),
+  }, async (request, reply) => {
+    const motivo = request.body?.motivo
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE contratos SET status = 'cancelado', reprovacao_motivo = $2,
+         cancelado_em = NOW(), reviewed_at = NOW()
+         WHERE id = $1 AND status = 'em_analise' RETURNING id, status`,
+        [request.params.id, motivo]
+      )
+      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não está em análise' })
+      return result.rows[0]
+    } finally { db.release() }
   })
 
   // PATCH /v1/contratos/:id/sinalizar-risco

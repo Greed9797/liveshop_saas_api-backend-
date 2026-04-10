@@ -8,7 +8,7 @@ export async function excelenciaRoutes(app) {
         SELECT
           COUNT(*) FILTER (WHERE status = 'ativo')     AS ativos,
           COUNT(*) FILTER (WHERE status = 'cancelado') AS cancelados,
-          COUNT(*) AS total_fechados
+          COUNT(*) FILTER (WHERE status IN ('ativo', 'cancelado')) AS total_fechados
         FROM contratos
       `)
 
