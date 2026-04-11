@@ -24,12 +24,11 @@ test.describe('Controle de Acesso por Papel (RBAC)', () => {
     });
     const { access_token } = await loginRes.json();
 
-    // Try to access analytics (franqueador_master-only endpoint if it exists)
-    // Use the franqueado endpoint to verify it works (positive case)
-    const res = await request.get('http://127.0.0.1:3001/v1/home', {
+    // GET /v1/franqueado requires franqueador_master (requirePapel(['franqueador_master']))
+    const res = await request.get('http://127.0.0.1:3001/v1/franqueado', {
       headers: { Authorization: `Bearer ${access_token}` },
     });
-    expect(res.ok()).toBeTruthy();
+    expect(res.status()).toBe(403);
   });
 
   test('sem token retorna 401', async ({ request }) => {
