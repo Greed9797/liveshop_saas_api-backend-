@@ -41,6 +41,7 @@ async function main() {
     '022_tenant_settings.sql',
     '023_billing_batch_setup.sql',
     '025_create_live_requests.sql',
+    '026_add_analytics_dashboard_indexes.sql',
   ]
 
   for (const migration of pendingMigrations) {

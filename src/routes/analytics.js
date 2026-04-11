@@ -126,4 +126,137 @@ export async function analyticsRoutes(app) {
       db.release()
     }
   })
+
+  app.get('/v1/analytics/dashboard', {
+    preHandler: [
+      app.authenticate,
+      app.requirePapel(['franqueador_master', 'franqueado']),
+    ],
+    schema: {
+      querystring: {
+        type: 'object',
+        properties: {
+          cliente_id: { type: 'string', format: 'uuid' },
+          mesAno: { type: 'string', pattern: '^\\d{4}-\\d{2}$' },
+        },
+      },
+    },
+  }, async (request) => {
+    const { tenant_id } = request.user
+    const { cliente_id, mesAno } = request.query
+    const refDate = mesAno ? `${mesAno}-01` : new Date().toISOString().slice(0, 8) + '01'
+
+    const clienteFilter = cliente_id ? 'AND l.cliente_id = $2' : ''
+    const params = cliente_id ? [refDate, cliente_id] : [refDate]
+
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const [faturamentoQ, vendasQ, horasQ, rankingQ] = await Promise.all([
+        // Query A — Faturamento Mensal (últimos 12 meses)
+        db.query(`
+          SELECT
+            to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
+            COALESCE(SUM(l.fat_gerado), 0) AS gmv
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) - interval '11 months'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY 1 ORDER BY 1
+        `, params),
+
+        // Query B — Vendas Mensal (últimos 12 meses)
+        db.query(`
+          SELECT
+            to_char(date_trunc('month', l.iniciado_em AT TIME ZONE 'America/Sao_Paulo'), 'YYYY-MM') AS mes,
+            COUNT(*) AS total_vendas
+          FROM lives l
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) - interval '11 months'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY 1 ORDER BY 1
+        `, params),
+
+        // Query C — Horas de Live por Dia (últimos 30 dias do período)
+        db.query(`
+          SELECT
+            (l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+            COALESCE(SUM(
+              EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 3600.0
+            ), 0) AS horas
+          FROM lives l
+          WHERE l.status IN ('encerrada', 'em_andamento')
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date) + interval '1 month' - interval '30 days'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY 1 ORDER BY 1
+        `, params),
+
+        // Query D — Ranking Top 10 Apresentadores (mês selecionado)
+        db.query(`
+          SELECT
+            l.apresentador_id,
+            u.nome AS apresentador_nome,
+            COUNT(*) AS total_lives,
+            COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
+          FROM lives l
+          JOIN users u ON u.id = l.apresentador_id
+          WHERE l.status = 'encerrada'
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' >= date_trunc('month', $1::date)
+            AND l.iniciado_em AT TIME ZONE 'America/Sao_Paulo' <  date_trunc('month', $1::date) + interval '1 month'
+            ${clienteFilter}
+          GROUP BY l.apresentador_id, u.nome
+          ORDER BY gmv_total DESC
+          LIMIT 10
+        `, params),
+      ])
+
+      const faturamentoRows = faturamentoQ.rows
+      const vendasRows = vendasQ.rows
+      const horasRows = horasQ.rows
+      const rankingRows = rankingQ.rows
+
+      // Derivar KPIs do mês selecionado
+      const mesAlvo = mesAno || new Date().toISOString().slice(0, 7)
+      const fatMesAtual = faturamentoRows.find(r => r.mes === mesAlvo)
+      const vendasMesAtual = vendasRows.find(r => r.mes === mesAlvo)
+
+      const faturamentoTotal = parseFloat(Number(fatMesAtual?.gmv ?? 0).toFixed(2))
+      const totalVendas = Number(vendasMesAtual?.total_vendas ?? 0)
+      // Proteção contra divisão por zero: retorna 0 quando totalVendas é 0
+      const ticketMedio = totalVendas > 0
+        ? parseFloat((faturamentoTotal / totalVendas).toFixed(2))
+        : 0
+
+      return {
+        kpis: {
+          faturamento_total: faturamentoTotal,
+          total_vendas: totalVendas,
+          ticket_medio: ticketMedio,
+        },
+        faturamento_mensal: faturamentoRows.map(r => ({
+          mes: r.mes,
+          gmv: parseFloat(Number(r.gmv).toFixed(2)),
+        })),
+        vendas_mensal: vendasRows.map(r => ({
+          mes: r.mes,
+          total_vendas: Number(r.total_vendas),
+        })),
+        horas_live_por_dia: horasRows.map(r => ({
+          dia: typeof r.dia === 'string' ? r.dia : r.dia.toISOString().slice(0, 10),
+          horas: parseFloat(Number(r.horas).toFixed(1)),
+        })),
+        ranking_apresentadores: rankingRows.map(r => ({
+          apresentador_id: r.apresentador_id,
+          apresentador_nome: r.apresentador_nome,
+          total_lives: Number(r.total_lives),
+          gmv_total: parseFloat(Number(r.gmv_total).toFixed(2)),
+        })),
+      }
+    } finally {
+      db.release()
+    }
+  })
 }
