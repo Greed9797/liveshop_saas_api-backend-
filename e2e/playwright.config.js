@@ -30,7 +30,19 @@ export default defineConfig({
   projects: [
     {
       name: 'chromium',
-      use: { browserName: 'chromium' },
+      use: {
+        browserName: 'chromium',
+        // SwiftShader (software WebGL) — required for CanvasKit in headless mode.
+        // Without this, WebGL context is lost and Flutter crashes mid-render.
+        launchOptions: {
+          args: [
+            '--use-gl=swiftshader',
+            '--disable-gpu-sandbox',
+            '--enable-webgl',
+            '--ignore-gpu-blocklist',
+          ],
+        },
+      },
     },
   ],
 });

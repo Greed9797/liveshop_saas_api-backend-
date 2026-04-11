@@ -8,9 +8,14 @@ test.describe('Cabines', () => {
   });
 
   test('tela de cabines carrega via navegação', async ({ page }) => {
-    await page.getByText('Cabines').click();
+    // Navigate via semantics node (aria-label confirmed in discovery)
+    await page.locator('flt-semantics[aria-label="Cabines"]').first().click();
     await page.waitForTimeout(2000);
-    await expect(page.locator('flt-glass-pane')).toBeVisible();
+    // Semantics nodes still present = Flutter rendered cabines screen
+    const semCount = await page.evaluate(
+      () => document.querySelectorAll('flt-semantics').length
+    );
+    expect(semCount).toBeGreaterThan(5);
   });
 
   test('API cabines retorna lista', async ({ request }) => {

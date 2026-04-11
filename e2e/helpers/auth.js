@@ -1,13 +1,13 @@
 /**
  * E2E Auth Helpers
  *
- * Flutter web's FlutterSecureStorage uses localStorage on the web.
- * These helpers login via the API and inject tokens into localStorage
- * so the Flutter app loads as authenticated.
+ * Flutter web's FlutterSecureStorage uses localStorage with the prefix
+ * "FlutterSecureStorage." (confirmed via Playwright discovery phase).
  *
- * NOTE: The exact localStorage key names must be verified during the
- * discovery phase (Task 7) by inspecting DevTools on a running app.
- * The keys below follow Flutter's default web storage naming.
+ * Exact keys:
+ *   FlutterSecureStorage.access_token
+ *   FlutterSecureStorage.refresh_token
+ *   FlutterSecureStorage.auth_user
  */
 
 export async function loginViaAPI(page, email, senha) {
@@ -22,9 +22,9 @@ export async function loginViaAPI(page, email, senha) {
   const data = await res.json();
 
   await page.evaluate((tokens) => {
-    localStorage.setItem('access_token', tokens.access_token);
-    localStorage.setItem('refresh_token', tokens.refresh_token);
-    localStorage.setItem('auth_user', JSON.stringify(tokens.user));
+    localStorage.setItem('FlutterSecureStorage.access_token', tokens.access_token);
+    localStorage.setItem('FlutterSecureStorage.refresh_token', tokens.refresh_token);
+    localStorage.setItem('FlutterSecureStorage.auth_user', JSON.stringify(tokens.user));
   }, data);
 
   await page.reload();
@@ -32,10 +32,10 @@ export async function loginViaAPI(page, email, senha) {
 }
 
 export async function waitForFlutter(page) {
-  // flt-glass-pane is the root element Flutter injects into the DOM
-  await page.waitForSelector('flt-glass-pane', { timeout: 15000 });
-  // Give Flutter time to build the widget tree and semantics overlay
-  await page.waitForTimeout(3000);
+  // Wait for Flutter to finish rendering — 53+ semantics nodes = dashboard ready
+  // The URL change alone is not enough; wait for network to settle + semantics to build
+  await page.waitForLoadState('networkidle', { timeout: 20000 });
+  await page.waitForTimeout(4000);
 }
 
 export const E2E_USERS = {

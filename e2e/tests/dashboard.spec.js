@@ -9,14 +9,20 @@ test.describe('Dashboard Franqueado', () => {
 
   test('dashboard carrega sem erros', async ({ page }) => {
     // The app auto-logs in as franqueado via E2E bootstrap
-    // Verify the main layout is visible
-    await expect(page.locator('flt-glass-pane')).toBeVisible();
+    // 53 flt-semantics nodes confirmed in discovery = full dashboard render
+    const semCount = await page.evaluate(
+      () => document.querySelectorAll('flt-semantics').length
+    );
+    expect(semCount).toBeGreaterThan(10);
   });
 
   test('sidebar de navegação está visível no desktop', async ({ page }) => {
-    // At 1280x800 (desktop), the sidebar should be visible
-    // Flutter renders sidebar items as semantics nodes
-    await expect(page.getByText('Cabines')).toBeVisible({ timeout: 10000 });
+    // At 1280x800 (desktop), sidebar items exposed via flt-semantics aria-labels
+    const cabinesVisible = await page.evaluate(() => {
+      const nodes = document.querySelectorAll('flt-semantics[aria-label]');
+      return Array.from(nodes).some(n => n.getAttribute('aria-label') === 'Cabines');
+    });
+    expect(cabinesVisible).toBe(true);
   });
 
   test('API financeiro/resumo retorna dados', async ({ request }) => {

@@ -15,9 +15,14 @@ test.describe('Financeiro', () => {
   test('tela financeiro carrega via navegação', async ({ page }) => {
     await page.goto('/');
     await waitForFlutter(page);
-    await page.getByText('Financeiro').click();
+    // Navigate via semantics node (aria-label confirmed in discovery)
+    await page.locator('flt-semantics[aria-label="Financeiro"]').first().click();
     await page.waitForTimeout(2000);
-    await expect(page.locator('flt-glass-pane')).toBeVisible();
+    // At least some semantics nodes = Flutter still rendering
+    const semCount = await page.evaluate(
+      () => document.querySelectorAll('flt-semantics').length
+    );
+    expect(semCount).toBeGreaterThan(5);
   });
 
   test('POST custos retorna 201 (fix RLS validado)', async ({ request }) => {
