@@ -332,10 +332,141 @@ export async function clienteDashboardRoutes(app) {
         benchmark_nicho: benchmarkNicho,
         benchmark_geral: benchmarkGeral,
       }
-      
+
     } catch (e) {
       console.error(e)
       throw e
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/vendas — histórico de lives do cliente por mês
+  app.get('/v1/cliente/vendas', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return { resumo: { total_faturamento: 0, total_vendas: 0, total_lives: 0 }, lives: [] }
+
+      const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
+      const ano = Number(request.query.ano) || new Date().getFullYear()
+
+      const livesQ = await db.query(`
+        SELECT
+          l.id, l.iniciado_em, l.encerrado_em,
+          c.numero AS cabine_numero,
+          l.streamer_nome,
+          l.status,
+          COALESCE(l.fat_gerado, 0) AS total_faturamento,
+          COALESCE(l.comissao_calculada, 0) AS comissao,
+          COALESCE(
+            (SELECT SUM(lp.quantidade) FROM live_products lp WHERE lp.live_id = l.id), 0
+          ) AS total_vendas,
+          EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60 AS duracao_min
+        FROM lives l
+        LEFT JOIN cabines c ON c.id = l.cabine_id
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND EXTRACT(MONTH FROM l.iniciado_em) = $3
+          AND EXTRACT(YEAR FROM l.iniciado_em) = $4
+          AND l.status IN ('encerrada', 'em_andamento')
+        ORDER BY l.iniciado_em DESC
+      `, [tenant_id, cliente_id, mes, ano])
+
+      const lives = livesQ.rows.map(r => ({
+        id: r.id,
+        iniciado_em: r.iniciado_em,
+        encerrado_em: r.encerrado_em,
+        cabine_numero: Number(r.cabine_numero),
+        streamer_nome: r.streamer_nome,
+        status: r.status,
+        total_faturamento: Number(r.total_faturamento),
+        comissao: Number(r.comissao),
+        total_vendas: Number(r.total_vendas),
+        duracao_min: Math.round(Number(r.duracao_min)),
+      }))
+
+      return {
+        resumo: {
+          total_faturamento: lives.reduce((s, l) => s + l.total_faturamento, 0),
+          total_vendas: lives.reduce((s, l) => s + l.total_vendas, 0),
+          total_lives: lives.length,
+        },
+        lives,
+      }
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/produtos — produtos agregados por mês
+  app.get('/v1/cliente/produtos', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return { resumo: { total_produtos: 0, total_qty: 0, total_faturamento: 0 }, produtos: [] }
+
+      const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
+      const ano = Number(request.query.ano) || new Date().getFullYear()
+
+      const prodQ = await db.query(`
+        SELECT
+          lp.produto_nome,
+          SUM(lp.quantidade) AS total_qty,
+          SUM(lp.valor_total) AS total_faturamento
+        FROM live_products lp
+        JOIN lives l ON l.id = lp.live_id
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND EXTRACT(MONTH FROM l.iniciado_em) = $3
+          AND EXTRACT(YEAR FROM l.iniciado_em) = $4
+          AND l.status IN ('encerrada', 'em_andamento')
+        GROUP BY lp.produto_nome
+        ORDER BY total_faturamento DESC
+      `, [tenant_id, cliente_id, mes, ano])
+
+      const produtos = prodQ.rows.map(p => ({
+        produto_nome: p.produto_nome,
+        total_qty: Number(p.total_qty),
+        total_faturamento: Number(p.total_faturamento),
+      }))
+
+      return {
+        resumo: {
+          total_produtos: produtos.length,
+          total_qty: produtos.reduce((s, p) => s + p.total_qty, 0),
+          total_faturamento: produtos.reduce((s, p) => s + p.total_faturamento, 0),
+        },
+        produtos,
+      }
     } finally {
       db.release()
     }
