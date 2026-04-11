@@ -8,7 +8,9 @@
     "dev": "nodemon --watch src src/server.js",
     "start": "node src/server.js",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "e2e": "playwright test --config=e2e/playwright.config.js",
+    "e2e:ui": "playwright test --config=e2e/playwright.config.js --ui"
   },
   "keywords": [],
   "author": "",
@@ -26,7 +28,9 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.50.0",
     "nodemon": "^3.1.14",
+    "serve": "^14.0.0",
     "vitest": "^4.1.2"
   }
 }
