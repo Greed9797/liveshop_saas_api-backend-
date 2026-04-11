@@ -37,7 +37,10 @@ async function main() {
     '018_lives_analytics_indexes.sql',
     '019_asaas_integration.sql',
     '020_asaas_integration_fixes.sql',
-    '021_tiktok_live_connector.sql'
+    '021_tiktok_live_connector.sql',
+    '022_tenant_settings.sql',
+    '023_billing_batch_setup.sql',
+    '025_create_live_requests.sql',
   ]
 
   for (const migration of pendingMigrations) {

@@ -472,4 +472,339 @@ export async function clienteDashboardRoutes(app) {
       db.release()
     }
   })
+
+  // ──────────────────────────────────────────────────────────────
+  // MINHAS CABINES
+  // ──────────────────────────────────────────────────────────────
+
+  // GET /v1/cliente/cabines — lista cabines vinculadas ao cliente via contratos ativos
+  app.get('/v1/cliente/cabines', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return []
+
+      const cabinesQ = await db.query(`
+        SELECT
+          cab.id,
+          cab.numero,
+          cab.status,
+          cab.live_atual_id,
+          cab.contrato_id,
+          $2::uuid          AS cliente_id,
+          cli.nome          AS cliente_nome,
+          u.nome            AS apresentador_nome,
+          COALESCE(snap.viewer_count, 0) AS viewer_count,
+          COALESCE(snap.gmv, 0)          AS gmv_atual,
+          l.iniciado_em
+        FROM contratos ct
+        JOIN cabines cab ON cab.contrato_id = ct.id
+        LEFT JOIN lives l ON l.id = cab.live_atual_id AND l.status = 'em_andamento'
+        LEFT JOIN LATERAL (
+          SELECT viewer_count, gmv
+          FROM live_snapshots
+          WHERE live_id = l.id
+          ORDER BY captured_at DESC
+          LIMIT 1
+        ) snap ON true
+        LEFT JOIN users u ON u.id = l.apresentador_id
+        JOIN clientes cli ON cli.id = ct.cliente_id
+        WHERE ct.tenant_id = $1
+          AND ct.cliente_id = $2
+          AND ct.status = 'ativo'
+        ORDER BY cab.numero
+      `, [tenant_id, cliente_id])
+
+      return cabinesQ.rows.map(r => ({
+        id:               r.id,
+        numero:           Number(r.numero),
+        status:           r.status,
+        live_atual_id:    r.live_atual_id,
+        contrato_id:      r.contrato_id,
+        cliente_id:       r.cliente_id,
+        cliente_nome:     r.cliente_nome,
+        apresentador_nome: r.apresentador_nome,
+        viewer_count:     Number(r.viewer_count),
+        gmv_atual:        Number(r.gmv_atual),
+        iniciado_em:      r.iniciado_em,
+      }))
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/cabines/:cabineId — detalhe da cabine + live atual + histórico
+  app.get('/v1/cliente/cabines/:cabineId', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request, reply) => {
+    const { sub: user_id, tenant_id } = request.user
+    const { cabineId } = request.params
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
+
+      // Valida que a cabine pertence ao cliente via contrato ativo
+      const cabineQ = await db.query(`
+        SELECT cab.id, cab.numero, cab.status, cab.live_atual_id
+        FROM cabines cab
+        JOIN contratos ct ON ct.id = cab.contrato_id
+        WHERE cab.id = $1
+          AND ct.tenant_id = $2
+          AND ct.cliente_id = $3
+          AND ct.status = 'ativo'
+        LIMIT 1
+      `, [cabineId, tenant_id, cliente_id])
+
+      if (!cabineQ.rows[0]) {
+        return reply.code(404).send({ error: 'Cabine não encontrada ou não pertence a este cliente' })
+      }
+      const cabine = cabineQ.rows[0]
+
+      // Live atual (se houver)
+      let liveAtual = null
+      if (cabine.live_atual_id) {
+        const liveQ = await db.query(`
+          SELECT
+            l.id AS live_id,
+            l.iniciado_em,
+            u.nome AS apresentador_nome,
+            COALESCE(snap.viewer_count, 0)    AS viewer_count,
+            COALESCE(snap.gmv, 0)             AS gmv_atual,
+            COALESCE(snap.total_orders, 0)    AS total_orders,
+            COALESCE(snap.likes_count, 0)     AS likes_count,
+            COALESCE(snap.comments_count, 0)  AS comments_count,
+            EXTRACT(EPOCH FROM (NOW() - l.iniciado_em)) / 60 AS duracao_minutos,
+            (
+              SELECT lp.produto_nome
+              FROM live_products lp
+              WHERE lp.live_id = l.id
+              GROUP BY lp.produto_nome
+              ORDER BY SUM(lp.quantidade) DESC
+              LIMIT 1
+            ) AS top_produto
+          FROM lives l
+          LEFT JOIN LATERAL (
+            SELECT viewer_count, gmv, total_orders, likes_count, comments_count
+            FROM live_snapshots
+            WHERE live_id = l.id
+            ORDER BY captured_at DESC
+            LIMIT 1
+          ) snap ON true
+          LEFT JOIN users u ON u.id = l.apresentador_id
+          WHERE l.id = $1 AND l.status = 'em_andamento'
+        `, [cabine.live_atual_id])
+
+        if (liveQ.rows[0]) {
+          const lr = liveQ.rows[0]
+          liveAtual = {
+            live_id:          lr.live_id,
+            viewer_count:     Number(lr.viewer_count),
+            gmv_atual:        Number(lr.gmv_atual),
+            total_orders:     Number(lr.total_orders),
+            duracao_minutos:  Math.round(Number(lr.duracao_minutos)),
+            apresentador_nome: lr.apresentador_nome,
+            iniciado_em:      lr.iniciado_em,
+            likes_count:      Number(lr.likes_count),
+            comments_count:   Number(lr.comments_count),
+            top_produto:      lr.top_produto,
+          }
+        }
+      }
+
+      // Histórico das últimas 20 lives desta cabine para este cliente
+      const historicoQ = await db.query(`
+        SELECT
+          l.id,
+          l.iniciado_em,
+          l.encerrado_em,
+          l.status,
+          COALESCE(l.fat_gerado, 0)        AS fat_gerado,
+          COALESCE(l.comissao_calculada, 0) AS comissao_calculada,
+          ROUND(
+            EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, l.iniciado_em) - l.iniciado_em)) / 60
+          ) AS duracao_min
+        FROM lives l
+        WHERE l.tenant_id = $1
+          AND l.cabine_id = $2
+          AND l.cliente_id = $3
+          AND l.status IN ('encerrada', 'em_andamento')
+        ORDER BY l.iniciado_em DESC
+        LIMIT 20
+      `, [tenant_id, cabineId, cliente_id])
+
+      return {
+        cabine: {
+          id:     cabine.id,
+          numero: Number(cabine.numero),
+          status: cabine.status,
+        },
+        live_atual: liveAtual,
+        historico_lives: historicoQ.rows.map(r => ({
+          id:                 r.id,
+          iniciado_em:        r.iniciado_em,
+          encerrado_em:       r.encerrado_em,
+          status:             r.status,
+          fat_gerado:         Number(r.fat_gerado),
+          comissao_calculada: Number(r.comissao_calculada),
+          duracao_min:        Number(r.duracao_min),
+        })),
+      }
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/cabines/:cabineId/solicitacoes — minhas solicitações desta cabine
+  app.get('/v1/cliente/cabines/:cabineId/solicitacoes', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request, reply) => {
+    const { sub: user_id, tenant_id } = request.user
+    const { cabineId } = request.params
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
+
+      const q = await db.query(`
+        SELECT id, data_solicitada, hora_inicio, hora_fim, observacao, status,
+               motivo_recusa, criado_em
+        FROM live_requests
+        WHERE tenant_id = $1
+          AND cabine_id = $2
+          AND cliente_id = $3
+        ORDER BY criado_em DESC
+        LIMIT 50
+      `, [tenant_id, cabineId, cliente_id])
+
+      return q.rows.map(r => ({
+        id:              r.id,
+        data_solicitada: r.data_solicitada, // DATE → "YYYY-MM-DD"
+        hora_inicio:     r.hora_inicio,     // TIME → "HH:MM:SS"
+        hora_fim:        r.hora_fim,
+        observacao:      r.observacao,
+        status:          r.status,
+        motivo_recusa:   r.motivo_recusa,
+        criado_em:       r.criado_em,
+      }))
+    } finally {
+      db.release()
+    }
+  })
+
+  // POST /v1/cliente/cabines/:cabineId/solicitar-live — criar solicitação de live
+  app.post('/v1/cliente/cabines/:cabineId/solicitar-live', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request, reply) => {
+    const { sub: user_id, tenant_id } = request.user
+    const { cabineId } = request.params
+    const { data_solicitada, hora_inicio, hora_fim, observacao } = request.body ?? {}
+
+    // Validações básicas (sem converter para Date — tudo string)
+    if (!data_solicitada || !hora_inicio || !hora_fim) {
+      return reply.code(400).send({ error: 'data_solicitada, hora_inicio e hora_fim são obrigatórios' })
+    }
+    // Formato esperado: "YYYY-MM-DD" e "HH:MM"
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data_solicitada)) {
+      return reply.code(400).send({ error: 'data_solicitada deve estar no formato YYYY-MM-DD' })
+    }
+    if (!/^\d{2}:\d{2}(:\d{2})?$/.test(hora_inicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(hora_fim)) {
+      return reply.code(400).send({ error: 'hora_inicio e hora_fim devem estar no formato HH:MM' })
+    }
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return reply.code(403).send({ error: 'Cliente não encontrado' })
+
+      // Valida que a cabine pertence ao cliente via contrato ativo
+      const cabineQ = await db.query(`
+        SELECT cab.id FROM cabines cab
+        JOIN contratos ct ON ct.id = cab.contrato_id
+        WHERE cab.id = $1
+          AND ct.tenant_id = $2
+          AND ct.cliente_id = $3
+          AND ct.status = 'ativo'
+        LIMIT 1
+      `, [cabineId, tenant_id, cliente_id])
+
+      if (!cabineQ.rows[0]) {
+        return reply.code(404).send({ error: 'Cabine não encontrada ou não pertence a este cliente' })
+      }
+
+      // Valida que a data não é no passado (comparação pura de string ISO date)
+      const hoje = new Date().toISOString().slice(0, 10) // "YYYY-MM-DD" UTC
+      if (data_solicitada < hoje) {
+        return reply.code(400).send({ error: 'data_solicitada não pode ser no passado' })
+      }
+
+      const inserted = await db.query(`
+        INSERT INTO live_requests
+          (tenant_id, cabine_id, cliente_id, solicitante_id,
+           data_solicitada, hora_inicio, hora_fim, observacao)
+        VALUES ($1, $2, $3, $4, $5::date, $6::time, $7::time, $8)
+        RETURNING id, data_solicitada, hora_inicio, hora_fim, observacao, status, criado_em
+      `, [tenant_id, cabineId, cliente_id, user_id,
+          data_solicitada, hora_inicio, hora_fim, observacao ?? null])
+
+      const r = inserted.rows[0]
+      return reply.code(201).send({
+        id:              r.id,
+        data_solicitada: r.data_solicitada,
+        hora_inicio:     r.hora_inicio,
+        hora_fim:        r.hora_fim,
+        observacao:      r.observacao,
+        status:          r.status,
+        criado_em:       r.criado_em,
+      })
+    } finally {
+      db.release()
+    }
+  })
 }
