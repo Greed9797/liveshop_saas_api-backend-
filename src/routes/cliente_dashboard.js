@@ -747,6 +747,9 @@ export async function clienteDashboardRoutes(app) {
     if (!/^\d{2}:\d{2}(:\d{2})?$/.test(hora_inicio) || !/^\d{2}:\d{2}(:\d{2})?$/.test(hora_fim)) {
       return reply.code(400).send({ error: 'hora_inicio e hora_fim devem estar no formato HH:MM' })
     }
+    if (hora_fim <= hora_inicio) {
+      return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
+    }
 
     const db = await app.dbTenant(tenant_id)
     try {

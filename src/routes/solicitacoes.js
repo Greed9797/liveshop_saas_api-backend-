@@ -136,6 +136,10 @@ export async function solicitacoesRoutes(app) {
     const { id } = request.params
     const { motivo_recusa } = request.body ?? {}
 
+    if (!motivo_recusa || !motivo_recusa.trim()) {
+      return reply.code(400).send({ error: 'motivo_recusa é obrigatório para recusar uma solicitação' })
+    }
+
     const db = await app.dbTenant(tenant_id)
     try {
       const checkQ = await db.query(

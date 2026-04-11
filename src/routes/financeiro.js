@@ -11,7 +11,7 @@ const toNum = (v) => Number(v ?? 0)
 
 export async function financeiroRoutes(app) {
   // GET /v1/financeiro/resumo?mes=&ano=
-  app.get('/v1/financeiro/resumo', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/financeiro/resumo', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const { mes, ano } = request.query
     const periodo = mes && ano
@@ -53,7 +53,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/faturamento?periodo=YYYY-MM
-  app.get('/v1/financeiro/faturamento', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/financeiro/faturamento', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const periodo = (request.query.periodo ?? new Date().toISOString().slice(0, 7)) + '-01'
 
@@ -79,7 +79,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/fluxo-caixa?mes=&ano=
-  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/financeiro/fluxo-caixa', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const { mes, ano } = request.query
     const periodo = mes && ano
@@ -113,7 +113,7 @@ export async function financeiroRoutes(app) {
   })
 
   // POST /v1/financeiro/custos
-  app.post('/v1/financeiro/custos', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const parsed = custoSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
 
@@ -135,7 +135,7 @@ export async function financeiroRoutes(app) {
   })
 
   // GET /v1/financeiro/custos
-  app.get('/v1/financeiro/custos', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/financeiro/custos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const mes = request.query.mes ?? new Date().toISOString().slice(0, 7)
     const db = await app.dbTenant(tenant_id)
@@ -154,7 +154,7 @@ export async function financeiroRoutes(app) {
   })
 
   // DELETE /v1/financeiro/custos/:id
-  app.delete('/v1/financeiro/custos/:id', { preHandler: app.authenticate }, async (request, reply) => {
+  app.delete('/v1/financeiro/custos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
