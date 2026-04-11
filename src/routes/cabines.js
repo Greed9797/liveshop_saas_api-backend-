@@ -323,11 +323,11 @@ export async function cabinesRoutes(app) {
         JOIN clientes cl ON cl.id = l.cliente_id
         WHERE l.cabine_id = $1
           AND l.status = 'encerrada'
-          AND l.iniciado_em > NOW() - INTERVAL '${dias} days'
+          AND l.iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY cl.id, cl.nome
         ORDER BY fat_total DESC
         LIMIT 5
-      `, [cabineId])
+      `, [cabineId, dias])
 
       const melhoresHorariosQ = await db.query(`
         SELECT
@@ -338,10 +338,10 @@ export async function cabinesRoutes(app) {
         FROM lives
         WHERE cabine_id = $1
           AND status = 'encerrada'
-          AND iniciado_em > NOW() - INTERVAL '${dias} days'
+          AND iniciado_em > NOW() - ($2 * interval '1 day')
         GROUP BY hora
         ORDER BY gmv_medio DESC
-      `, [cabineId])
+      `, [cabineId, dias])
 
       const desempenhoMensalQ = await db.query(`
         SELECT

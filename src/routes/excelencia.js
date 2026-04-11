@@ -1,6 +1,6 @@
 export async function excelenciaRoutes(app) {
   // GET /v1/excelencia/metricas
-  app.get('/v1/excelencia/metricas', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/excelencia/metricas', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {

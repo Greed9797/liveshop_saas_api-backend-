@@ -71,8 +71,8 @@ export async function solicitacoesRoutes(app) {
     const client = await app.db.pool.connect()
     try {
       await client.query('BEGIN')
-      // Configura RLS para a transação
-      await client.query(`SET LOCAL app.tenant_id = '${tenant_id}'`)
+      // Configura RLS para a transação (parameterizado para evitar SQL injection)
+      await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenant_id])
 
       // Lock pessimista para evitar double-approve simultâneo
       const lockQ = await client.query(`

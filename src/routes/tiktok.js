@@ -44,9 +44,22 @@ export async function tiktokRoutes(app) {
       return reply.code(400).send({ error: 'Parâmetros code e state são obrigatórios' });
     }
 
-    const tenantId = state; // O state que enviamos no /connect era o tenantId
+    const tenantId = state;
+
+    // Validar que state é um UUID válido antes de usar como tenant_id.
+    // TODO: quando a integração real TikTok ativar, substituir por HMAC-signed token
+    // que contenha tenant_id + timestamp + nonce para prevenir CSRF.
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (!uuidRe.test(tenantId)) {
+      return reply.code(400).send({ error: 'State inválido' })
+    }
 
     try {
+      // Verificar que o tenant existe antes de atualizar credenciais
+      const tenantCheck = await app.db.query(`SELECT id FROM tenants WHERE id = $1`, [tenantId])
+      if (tenantCheck.rowCount === 0) {
+        return reply.code(404).send({ error: 'Tenant não encontrado' })
+      }
       // Endpoint real para troca de código por token
       // POST https://open.tiktokapis.com/v2/oauth/token/
       // Na versão em produção isso seria um fetch (ou axios):
@@ -155,7 +168,7 @@ export async function tiktokRoutes(app) {
   });
 
   // ── GET /v1/lives/:liveId/stream — SSE real-time ──────────────────────────
-  app.get('/v1/lives/:liveId/stream', { preHandler: [app.authenticate] }, async (request, reply) => {
+  app.get('/v1/lives/:liveId/stream', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { liveId } = request.params
 

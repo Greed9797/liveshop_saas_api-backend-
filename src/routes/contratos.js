@@ -8,7 +8,7 @@ const createSchema = z.object({
 
 export async function contratosRoutes(app) {
   // POST /v1/contratos
-  app.post('/v1/contratos', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
 
@@ -27,7 +27,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/contratos — lista todos os contratos do tenant
-  app.get('/v1/contratos', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -46,7 +46,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/contratos/:id — detalhe de um contrato
-  app.get('/v1/contratos/:id', { preHandler: app.authenticate }, async (request, reply) => {
+  app.get('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -65,7 +65,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/assinar → em_analise
-  app.post('/v1/contratos/:id/assinar', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -84,7 +84,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/assinar-digital
-  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { signatureImageBase64, acceptedTerms } = request.body ?? {}
 
@@ -93,6 +93,9 @@ export async function contratosRoutes(app) {
     }
     if (!signatureImageBase64) {
       return reply.code(400).send({ error: 'Imagem da assinatura é obrigatória' })
+    }
+    if (signatureImageBase64.length > 500_000) {
+      return reply.code(400).send({ error: 'Imagem da assinatura excede o tamanho máximo permitido' })
     }
 
     const db = await app.dbTenant(tenant_id)
@@ -156,7 +159,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/analisar → score automático → ativo ou cancelado
-  app.post('/v1/contratos/:id/analisar', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -253,7 +256,7 @@ export async function contratosRoutes(app) {
   })
 
   // PATCH /v1/contratos/:id/cancelar
-  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.authenticate }, async (request, reply) => {
+  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -270,7 +273,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/analise-credito
-  app.get('/v1/analise-credito', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/analise-credito', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -377,6 +380,9 @@ export async function contratosRoutes(app) {
     preHandler: app.requirePapel(['franqueador_master']),
   }, async (request, reply) => {
     const motivo = request.body?.motivo
+    if (!motivo || motivo.trim().length < 8) {
+      return reply.code(400).send({ error: 'Motivo deve ter pelo menos 8 caracteres' })
+    }
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {

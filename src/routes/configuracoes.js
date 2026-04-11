@@ -13,7 +13,7 @@ const configSchema = z.object({
 
 export async function configuracoesRoutes(app) {
   // GET /v1/configuracoes
-  app.get('/v1/configuracoes', { preHandler: app.authenticate }, async (request, reply) => {
+  app.get('/v1/configuracoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     

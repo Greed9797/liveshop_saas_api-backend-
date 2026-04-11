@@ -69,11 +69,6 @@ export async function boletosRoutes(app) {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
-      // Marca boletos vencidos automaticamente
-      await db.query(
-        `UPDATE boletos SET status = 'vencido'
-         WHERE status = 'pendente' AND vencimento < CURRENT_DATE`
-      )
       const result = await db.query(
         `SELECT id, tipo, valor, vencimento, status, pago_em, referencia_externa, competencia,
                 asaas_id, asaas_url, asaas_pix_copia_cola, gerado_automaticamente, asaas_error
@@ -101,7 +96,7 @@ export async function boletosRoutes(app) {
   })
 
   // PATCH /v1/boletos/:id/pagar (dev manual)
-  app.patch('/v1/boletos/:id/pagar', { preHandler: app.authenticate }, async (request, reply) => {
+  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -119,6 +114,13 @@ export async function boletosRoutes(app) {
 
   // POST /v1/webhooks/pagamento (Pagar.me webhook)
   app.post('/v1/webhooks/pagamento', async (request, reply) => {
+    // Validar token secreto enviado no header pelo Pagar.me
+    const receivedToken = request.headers['x-webhook-token']
+    const expectedToken = process.env.PAGAMENTO_WEBHOOK_TOKEN ?? ''
+    if (!expectedToken || receivedToken !== expectedToken) {
+      return reply.code(401).send({ error: 'Unauthorized' })
+    }
+
     const { id, status } = request.body ?? {}
     if (!id || !status) return reply.code(400).send({ error: 'Payload inválido' })
 

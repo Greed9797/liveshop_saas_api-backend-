@@ -1,5 +1,7 @@
 import Fastify from 'fastify'
 import cors from '@fastify/cors'
+import rateLimit from '@fastify/rate-limit'
+import helmet from '@fastify/helmet'
 import { dbPlugin } from './plugins/db.js'
 import { authPlugin } from './plugins/auth.js'
 import { authRoutes } from './routes/auth.js'
@@ -28,9 +30,17 @@ export async function buildApp(opts = {}) {
   })
 
   await app.register(cors, {
-    origin: process.env.CORS_ORIGIN ?? true,
+    origin: process.env.CORS_ORIGIN ?? (process.env.NODE_ENV === 'production' ? false : true),
     allowedHeaders: ['Authorization', 'Content-Type', 'Accept'],
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  })
+  // Security headers (CSP disabled — TikTok callback returns text/html)
+  await app.register(helmet, { contentSecurityPolicy: false })
+  // Global rate limiting (100 req/min default; auth routes override with stricter limits)
+  await app.register(rateLimit, {
+    max: 100,
+    timeWindow: '1 minute',
+    errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
   })
   await app.register(dbPlugin)
   await app.register(authPlugin)

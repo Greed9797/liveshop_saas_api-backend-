@@ -7,9 +7,21 @@ const createSchema = z.object({
   lng:           z.number().optional(),
 })
 
+const converterSchema = z.object({
+  cliente_id: z.string().uuid().optional(),
+  celular:    z.string().min(1).optional(),
+  cnpj:       z.string().optional(),
+  cep:        z.string().optional(),
+  cidade:     z.string().optional(),
+  estado:     z.string().length(2).optional(),
+  fat_anual:  z.number().nonnegative().optional(),
+  lat:        z.number().optional(),
+  lng:        z.number().optional(),
+})
+
 export async function recomendacoesRoutes(app) {
   // GET /v1/recomendacoes
-  app.get('/v1/recomendacoes', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -24,7 +36,7 @@ export async function recomendacoesRoutes(app) {
   })
 
   // POST /v1/recomendacoes
-  app.post('/v1/recomendacoes', { preHandler: app.authenticate }, async (request, reply) => {
+  app.post('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
 
@@ -45,9 +57,12 @@ export async function recomendacoesRoutes(app) {
   })
 
   // PATCH /v1/recomendacoes/:id/converter
-  app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.authenticate }, async (request, reply) => {
+  app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+    const parsed = converterSchema.safeParse(request.body ?? {})
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+
     const { tenant_id } = request.user
-    const { cliente_id, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng } = request.body || {}
+    const { cliente_id, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng } = parsed.data
     const db = await app.dbTenant(tenant_id)
     try {
       const recQ = await db.query(

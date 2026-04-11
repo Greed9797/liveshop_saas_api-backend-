@@ -45,7 +45,13 @@ describe('Route regressions: SQL and RBAC', () => {
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {
-      request.user = { tenant_id: 'tenant-1' }
+      request.user = { tenant_id: 'tenant-1', papel: 'franqueado' }
+    })
+    // requirePapel é usado diretamente como preHandler (sem authenticate na frente)
+    // → precisa setar request.user se não estiver definido
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { tenant_id: 'tenant-1', papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
 
@@ -518,6 +524,11 @@ describe('Route regressions: SQL and RBAC', () => {
 
     app.decorate('authenticate', async (req) => {
       req.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'franqueado' }
+    })
+    // requirePapel é o único preHandler na rota → seta request.user se não definido
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) request.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'franqueado' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
     })
     app.decorate('dbTenant', vi.fn().mockResolvedValue({ query: mockQuery, release: mockRelease }))
     app.decorate('db', { query: vi.fn() })

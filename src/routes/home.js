@@ -1,7 +1,7 @@
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
   app.get('/v1/home/dashboard', {
-    preHandler: app.authenticate,
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master']),
   }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)

@@ -13,7 +13,7 @@ const app = await buildApp()
 connectorManager.init({ db: app.db, log: app.log })
 
 // Initialize Billing Engine for Batch Billing
-startBillingEngine(app.db)
+startBillingEngine(app.db.pool)
 
 await app.listen({ port: Number(process.env.PORT ?? 3001), host: '0.0.0.0' })
 console.log(`LiveShop API rodando na porta ${process.env.PORT ?? 3001}`)
@@ -40,5 +40,16 @@ cron.schedule('0 3 * * *', async () => {
     await cleanupOrphanContracts(app)
   } catch (error) {
     app.log.error({ error }, 'Falha ao limpar contratos órfãos')
+  }
+})
+
+// Daily: mark overdue boletos as 'vencido' (moved from GET /v1/boletos to avoid mutating state on read)
+cron.schedule('0 1 * * *', async () => {
+  try {
+    await app.db.query(
+      `UPDATE boletos SET status = 'vencido' WHERE status = 'pendente' AND vencimento < CURRENT_DATE`
+    )
+  } catch (error) {
+    app.log.error({ error }, 'Falha ao atualizar boletos vencidos')
   }
 })
