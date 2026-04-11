@@ -369,7 +369,7 @@ export async function clienteDashboardRoutes(app) {
         SELECT
           l.id, l.iniciado_em, l.encerrado_em,
           c.numero AS cabine_numero,
-          l.streamer_nome,
+          u.nome AS apresentador_nome,
           l.status,
           COALESCE(l.fat_gerado, 0) AS total_faturamento,
           COALESCE(l.comissao_calculada, 0) AS comissao,
@@ -379,6 +379,7 @@ export async function clienteDashboardRoutes(app) {
           EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60 AS duracao_min
         FROM lives l
         LEFT JOIN cabines c ON c.id = l.cabine_id
+        LEFT JOIN users u ON u.id = l.apresentador_id
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
           AND EXTRACT(MONTH FROM l.iniciado_em) = $3
@@ -392,7 +393,7 @@ export async function clienteDashboardRoutes(app) {
         iniciado_em: r.iniciado_em,
         encerrado_em: r.encerrado_em,
         cabine_numero: Number(r.cabine_numero),
-        streamer_nome: r.streamer_nome,
+        streamer_nome: r.apresentador_nome,
         status: r.status,
         total_faturamento: Number(r.total_faturamento),
         comissao: Number(r.comissao),
