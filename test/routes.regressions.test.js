@@ -509,6 +509,40 @@ describe('Route regressions: SQL and RBAC', () => {
     await app.close()
   })
 
+  it('POST /v1/financeiro/custos deve usar dbTenant (não app.db)', async () => {
+    const app = Fastify()
+    const mockQuery = vi.fn().mockResolvedValue({
+      rows: [{ id: 'uuid-1', descricao: 'Aluguel', valor: 1500, tipo: 'aluguel', competencia: '2026-04' }]
+    })
+    const mockRelease = vi.fn()
+
+    app.decorate('authenticate', async (req) => {
+      req.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'franqueado' }
+    })
+    app.decorate('dbTenant', vi.fn().mockResolvedValue({ query: mockQuery, release: mockRelease }))
+    app.decorate('db', { query: vi.fn() })
+
+    await app.register(financeiroRoutes)
+    await app.ready()
+
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/financeiro/custos',
+      payload: { descricao: 'Aluguel', valor: 1500, tipo: 'aluguel', competencia: '2026-04' }
+    })
+
+    expect(res.statusCode).toBe(201)
+    expect(app.dbTenant).toHaveBeenCalledWith('tenant-1')
+    expect(mockRelease).toHaveBeenCalled()
+    expect(app.db.query).not.toHaveBeenCalled()
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO custos'),
+      ['tenant-1', 'Aluguel', 1500, 'aluguel', '2026-04']
+    )
+
+    await app.close()
+  })
+
   it('GET /v1/lives/:liveId/stream retorna 404 quando live não pertence ao tenant', async () => {
     const app = Fastify()
     const queryMock = vi.fn().mockResolvedValue({ rows: [] })

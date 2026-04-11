@@ -120,13 +120,18 @@ export async function financeiroRoutes(app) {
     const { tenant_id } = request.user
     const { descricao, valor, tipo, competencia } = parsed.data
 
-    const result = await app.db.query(
-      `INSERT INTO custos (tenant_id, descricao, valor, tipo, competencia)
-       VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
-      [tenant_id, descricao, valor, tipo, competencia]
-    )
-    const row = result.rows[0]
-    return reply.code(201).send({ ...row, valor: toNum(row.valor) })
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `INSERT INTO custos (tenant_id, descricao, valor, tipo, competencia)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id, descricao, valor, tipo, competencia`,
+        [tenant_id, descricao, valor, tipo, competencia]
+      )
+      const row = result.rows[0]
+      return reply.code(201).send({ ...row, valor: toNum(row.valor) })
+    } finally {
+      db.release()
+    }
   })
 
   // GET /v1/financeiro/custos
