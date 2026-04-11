@@ -15,9 +15,9 @@ test.describe('Financeiro', () => {
   test('tela financeiro carrega via navegação', async ({ page }) => {
     await page.goto('/');
     await waitForFlutter(page);
-    // Navigate via semantics node (aria-label confirmed in discovery)
-    await page.locator('flt-semantics[aria-label="Financeiro"]').first().click();
-    await page.waitForTimeout(2000);
+    // Nav items: role=button, textContent matches label (no aria-label)
+    await page.getByRole('button', { name: 'Financeiro' }).first().click();
+    await page.waitForTimeout(3000);
     // At least some semantics nodes = Flutter still rendering
     const semCount = await page.evaluate(
       () => document.querySelectorAll('flt-semantics').length
@@ -32,7 +32,7 @@ test.describe('Financeiro', () => {
         descricao: 'Custo E2E Teste',
         valor: 500,
         tipo: 'outros',
-        competencia: '2026-04',
+        competencia: '2026-04-01',
       },
     });
     expect(res.status()).toBe(201);

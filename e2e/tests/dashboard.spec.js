@@ -17,10 +17,11 @@ test.describe('Dashboard Franqueado', () => {
   });
 
   test('sidebar de navegação está visível no desktop', async ({ page }) => {
-    // At 1280x800 (desktop), sidebar items exposed via flt-semantics aria-labels
+    // At 1280x800 (desktop), nav items render as flt-semantics[role=button] with textContent
+    // aria-label is NOT set; accessible name comes from textContent
     const cabinesVisible = await page.evaluate(() => {
-      const nodes = document.querySelectorAll('flt-semantics[aria-label]');
-      return Array.from(nodes).some(n => n.getAttribute('aria-label') === 'Cabines');
+      return Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+        .some(n => (n.textContent || '').trim() === 'Cabines');
     });
     expect(cabinesVisible).toBe(true);
   });

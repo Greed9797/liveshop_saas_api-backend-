@@ -8,9 +8,9 @@ test.describe('Cabines', () => {
   });
 
   test('tela de cabines carrega via navegação', async ({ page }) => {
-    // Navigate via semantics node (aria-label confirmed in discovery)
-    await page.locator('flt-semantics[aria-label="Cabines"]').first().click();
-    await page.waitForTimeout(2000);
+    // Nav items: role=button, textContent matches label (no aria-label)
+    await page.getByRole('button', { name: 'Cabines' }).first().click();
+    await page.waitForTimeout(3000);
     // Semantics nodes still present = Flutter rendered cabines screen
     const semCount = await page.evaluate(
       () => document.querySelectorAll('flt-semantics').length

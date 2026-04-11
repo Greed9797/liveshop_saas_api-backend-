@@ -30,21 +30,24 @@ test.describe('Autenticação', () => {
     expect(res.status()).toBe(401);
   });
 
-  test('login manual via form redireciona para dashboard', async ({ page }) => {
+  test('E2E bootstrap auto-login carrega dashboard completo', async ({ page }) => {
+    // In E2E build (dart-define=E2E_TESTING=true), bootstrapE2EAuth auto-logs in
+    // so the app starts directly on the dashboard — login form never appears.
+    // This test verifies the auto-login path works end-to-end.
     await page.goto('/');
     await waitForFlutter(page);
 
-    // Flutter TextField gera inputs reais com aria-label (confirmado via discovery)
-    await page.locator('input[aria-label="Email"]').fill(E2E_USERS.franqueado.email);
-    await page.locator('input[aria-label="Senha"]').fill(E2E_USERS.franqueado.senha);
-    await page.getByRole('button', { name: 'ENTRAR' }).click();
-
-    await waitForFlutter(page);
-
-    // Dashboard com 50+ semantics nodes indica render completo (53 no discovery)
+    // Dashboard fully rendered: 53 flt-semantics nodes confirmed in discovery
     const semCount = await page.evaluate(
       () => document.querySelectorAll('flt-semantics').length
     );
     expect(semCount).toBeGreaterThan(10);
+
+    // Nav items present as role=button with textContent
+    const hasNavItem = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('flt-semantics[role="button"]'))
+        .some(n => (n.textContent || '').trim() === 'Financeiro')
+    );
+    expect(hasNavItem).toBe(true);
   });
 });

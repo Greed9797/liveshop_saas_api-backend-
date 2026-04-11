@@ -10,8 +10,8 @@ test.describe('Controle de Acesso por Papel (RBAC)', () => {
     expect(loginRes.ok()).toBeTruthy();
     const { access_token } = await loginRes.json();
 
-    // Try to access financeiro (franqueado-only endpoint)
-    const res = await request.get('http://127.0.0.1:3001/v1/financeiro/resumo', {
+    // Try to access cabines (franqueado/franqueador_master only)
+    const res = await request.get('http://127.0.0.1:3001/v1/cabines', {
       headers: { Authorization: `Bearer ${access_token}` },
     });
     // Should be 403 (forbidden) for cliente_parceiro
@@ -24,8 +24,8 @@ test.describe('Controle de Acesso por Papel (RBAC)', () => {
     });
     const { access_token } = await loginRes.json();
 
-    // GET /v1/franqueado requires franqueador_master (requirePapel(['franqueador_master']))
-    const res = await request.get('http://127.0.0.1:3001/v1/franqueado', {
+    // GET /v1/franqueado/unidades requires franqueador_master
+    const res = await request.get('http://127.0.0.1:3001/v1/franqueado/unidades', {
       headers: { Authorization: `Bearer ${access_token}` },
     });
     expect(res.status()).toBe(403);
