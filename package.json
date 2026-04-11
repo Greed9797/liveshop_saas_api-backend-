@@ -12,6 +12,9 @@
     "e2e": "playwright test --config=e2e/playwright.config.js",
     "e2e:ui": "playwright test --config=e2e/playwright.config.js --ui"
   },
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
