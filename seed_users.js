@@ -25,19 +25,31 @@ async function createTestUsers() {
 
     // 3. Usuário Cliente Parceiro
     await pool.query(`
-      INSERT INTO users (tenant_id, nome, email, senha_hash, papel) 
+      INSERT INTO users (tenant_id, nome, email, senha_hash, papel)
       VALUES ($1, 'Loja Parceira Teste', 'cliente@liveshop.com', $2, 'cliente_parceiro')
       ON CONFLICT (email) DO NOTHING
     `, [franqueadoId, senhaHash])
+
+    // 4. Usuário Franqueador Master
+    const senhaAdmin = await bcrypt.hash('admin123', 10)
+    await pool.query(`
+      INSERT INTO users (tenant_id, nome, email, senha_hash, papel)
+      VALUES ($1, 'Admin Master', 'admin@liveshop.com', $2, 'franqueador_master')
+      ON CONFLICT (email) DO NOTHING
+    `, [franqueadoId, senhaAdmin])
 
     console.log('--- CREDENCIAIS CRIADAS PARA TESTE ---')
     console.log('1. Franqueado (Dashboard Principal, Cabines):')
     console.log('   E-mail: franqueado@liveshop.com')
     console.log('   Senha:  teste123\n')
-    
+
     console.log('2. Cliente Parceiro (Painel do Cliente):')
     console.log('   E-mail: cliente@liveshop.com')
-    console.log('   Senha:  teste123')
+    console.log('   Senha:  teste123\n')
+
+    console.log('3. Franqueador Master (Painel Master, Auditoria):')
+    console.log('   E-mail: admin@liveshop.com')
+    console.log('   Senha:  admin123')
     
   } catch (err) {
     console.error('Erro ao criar usuários:', err)
