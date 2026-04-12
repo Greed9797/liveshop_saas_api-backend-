@@ -21,12 +21,11 @@ describe('oauth-state', () => {
     expect(verifySignedState(tampered)).toBeNull()
   })
 
-  it('rejeita state expirado (TTL 1ms)', () => {
+  it('rejeita state expirado', async () => {
     const state = createSignedState({ tenantId: 'tenant-1', nonce: 'abc' })
-    // Aguarda 2ms e valida com TTL de 1ms → expirado
-    return new Promise(r => setTimeout(r, 2)).then(() => {
-      expect(verifySignedState(state, 1)).toBeNull()
-    })
+    // Aguarda 50ms e valida com TTL de 10ms → garantido expirado
+    await new Promise(r => setTimeout(r, 50))
+    expect(verifySignedState(state, 10)).toBeNull()
   })
 
   it('rejeita state com formato inválido', () => {

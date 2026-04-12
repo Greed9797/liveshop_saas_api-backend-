@@ -670,6 +670,31 @@ describe('Route regressions: SQL and RBAC', () => {
       await app.close()
     })
 
+    it('GET /v1/lives/:liveId/events retorna 404 se live não existe ou não está em_andamento', async () => {
+      process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
+      const app = Fastify()
+      const queryMock = vi.fn().mockResolvedValue({ rows: [] }) // live inexistente
+      app.decorate('authenticate', async (request) => {
+        request.user = { tenant_id: '00000000-0000-0000-0000-000000000001', papel: 'franqueado' }
+      })
+      app.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!request.user) request.user = { tenant_id: '00000000-0000-0000-0000-000000000001', papel: 'franqueado' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      app.decorate('db', { query: queryMock })
+      app.decorate('dbTenant', async () => ({ query: queryMock, release: vi.fn() }))
+      const { tiktokRoutes } = await import('../src/routes/tiktok.js')
+      await app.register(tiktokRoutes)
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/lives/00000000-0000-0000-0000-000000000999/events',
+      })
+      expect(res.statusCode).toBe(404)
+      expect(res.json().error).toMatch(/não encontrada|não está ao vivo/i)
+      await app.close()
+    })
+
     it('GET /v1/tiktok/callback aceita signed state válido gerado por createSignedState', async () => {
       const { app, queryMock } = await buildTiktokApp()
       const { createSignedState } = await import('../src/services/oauth-state.js')

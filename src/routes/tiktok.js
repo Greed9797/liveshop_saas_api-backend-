@@ -170,6 +170,57 @@ export async function tiktokRoutes(app) {
     }
   });
 
+  // ── GET /v1/lives/:liveId/events — SSE por-evento (chat/gift/share) ───────
+  // Canal separado do /stream (snapshots agregados 30s). Emite eventos
+  // individuais no momento em que acontecem na live — consumidor renderiza
+  // chat ao vivo, gifts chegando, shares etc.
+  app.get('/v1/lives/:liveId/events', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { liveId } = request.params
+
+    // Validar ownership e status — mesma query do /stream existente
+    const { rows } = await app.db.query(
+      `SELECT id FROM lives WHERE id = $1 AND tenant_id = $2 AND status = 'em_andamento'`,
+      [liveId, tenant_id]
+    )
+    if (rows.length === 0) {
+      return reply.code(404).send({ error: 'Live não encontrada ou não está ao vivo' })
+    }
+
+    reply.hijack()
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    reply.raw.flushHeaders()
+
+    const emitter = getEmitter()
+    const eventName = `event:${liveId}`
+    const handler = (evt) => {
+      if (!reply.raw.destroyed) {
+        reply.raw.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`)
+      }
+    }
+    emitter.on(eventName, handler)
+
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(': keep-alive\n\n')
+    }, 15_000)
+
+    await new Promise((resolve) => {
+      request.raw.once('close', resolve)
+      request.raw.once('error', resolve)
+    })
+
+    emitter.off(eventName, handler)
+    clearInterval(heartbeat)
+    try { reply.raw.end() } catch {}
+  })
+
   // ── GET /v1/lives/:liveId/stream — SSE real-time ──────────────────────────
   app.get('/v1/lives/:liveId/stream', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
     const { tenant_id } = request.user
