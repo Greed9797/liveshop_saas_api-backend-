@@ -188,6 +188,13 @@ async function startConnector(liveId, tenantId, username) {
     })
   })
 
+  connection.on('streamEnd', () => {
+    _log?.info({ liveId, username }, 'tiktokManager: streamEnd recebido do TikTok')
+    stopConnector(liveId).catch(err => {
+      _log?.error({ err, liveId }, 'tiktokManager: erro ao parar connector após streamEnd')
+    })
+  })
+
   connection.on('disconnected', () => {
     _log?.warn({ liveId, username }, 'tiktokManager: connector desconectado — cron reconectará')
     const entry = _liveMap.get(liveId)
@@ -273,6 +280,13 @@ async function _flushToDb(liveId, entry) {
 async function _handleChat(data, { liveId, tenantId, state, produtos }) {
   state.comments_count += 1
   state.dirty = true
+
+  _emitter.emit(`event:${liveId}`, {
+    type: 'chat',
+    user: data.uniqueId,
+    comment: data.comment ?? '',
+    ts: Date.now(),
+  })
 
   const comment = (data.comment ?? '').toLowerCase()
   if (!comment.includes('quero')) return

@@ -161,6 +161,61 @@ describe('TikTokConnectorManager', () => {
     expect(receivedEvents[1]).toMatchObject({ type: 'share', user: 'dave' })
   })
 
+  it('handler streamEnd para o connector', async () => {
+    const liveId = 'live-end-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+    expect(has(liveId)).toBe(true)
+
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const streamEndCall = connection.on.mock.calls.find(([evt]) => evt === 'streamEnd')
+    expect(streamEndCall).toBeDefined()
+    const streamEndHandler = streamEndCall[1]
+
+    streamEndHandler()
+
+    // stopConnector é async — aguarda microtasks + pending db.query promises
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+
+    expect(has(liveId)).toBe(false)
+  })
+
+  it('handler chat emite event:liveId com comment', async () => {
+    const liveId = 'live-chat-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    const receivedEvents = []
+    getEmitter().on(`event:${liveId}`, (evt) => receivedEvents.push(evt))
+
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const chatCall = connection.on.mock.calls.find(([evt]) => evt === 'chat')
+    expect(chatCall).toBeDefined()
+    const chatHandler = chatCall[1]
+
+    chatHandler({ uniqueId: 'eve', comment: 'adorei a live' })
+
+    // chatHandler é async (via _handleChat.catch), aguarda microtask
+    await new Promise(r => setImmediate(r))
+
+    const chatEvt = receivedEvents.find(e => e.type === 'chat')
+    expect(chatEvt).toBeDefined()
+    expect(chatEvt).toMatchObject({ type: 'chat', user: 'eve', comment: 'adorei a live' })
+  })
+
   it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
     const liveId = 'live-flush-1'
     const db = makeDb([
