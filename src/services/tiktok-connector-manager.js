@@ -120,9 +120,15 @@ async function startConnector(liveId, tenantId, username) {
     gmv: 0,
     likes_count: 0,
     comments_count: 0,
+    gifts_diamonds: 0,
+    shares_count: 0,
     dirty: false,
     flushing: false,
     lastFlush: Date.now(),
+    // Circuit breaker state (Task 7)
+    errorCount: 0,
+    errorWindowStart: Date.now(),
+    circuitOpen: false,
   }
 
   const connection = new WebcastPushConnection(username)
@@ -200,12 +206,13 @@ async function _flushToDb(liveId, entry) {
     await _db.query(
       `INSERT INTO live_snapshots
          (live_id, tenant_id, viewer_count, total_viewers, total_orders,
-          gmv, likes_count, comments_count, captured_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())`,
+          gmv, likes_count, comments_count, gifts_diamonds, shares_count, captured_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
       [
         liveId, tenantId,
         state.viewer_count, state.total_viewers, state.total_orders,
         state.gmv, state.likes_count, state.comments_count,
+        state.gifts_diamonds, state.shares_count,
       ]
     )
 
@@ -226,6 +233,8 @@ async function _flushToDb(liveId, entry) {
     gmv:            state.gmv,
     likes_count:    state.likes_count,
     comments_count: state.comments_count,
+    gifts_diamonds: state.gifts_diamonds,
+    shares_count:   state.shares_count,
   })
 }
 

@@ -86,4 +86,32 @@ describe('TikTokConnectorManager', () => {
     const e2 = getEmitter()
     expect(e1).toBe(e2)
   })
+
+  it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
+    const liveId = 'live-flush-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    // Fire roomUser pra marcar dirty e garantir flush
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const roomUserHandler = connection.on.mock.calls.find(([evt]) => evt === 'roomUser')[1]
+    roomUserHandler({ viewerCount: 42 })
+
+    // Limpa queries do start e força resolved value pra UPDATE lives do stopConnector
+    db.query.mockClear()
+    db.query.mockResolvedValue({ rows: [] })
+
+    await stopConnector(liveId)
+
+    const insertCall = db.query.mock.calls.find(([sql]) => sql.includes('INSERT INTO live_snapshots'))
+    expect(insertCall).toBeDefined()
+    expect(insertCall[0]).toContain('gifts_diamonds')
+    expect(insertCall[0]).toContain('shares_count')
+  })
 })
