@@ -254,6 +254,51 @@ describe('TikTokConnectorManager', () => {
     expect(updateCall[1]).toEqual([100, 5, expect.any(Number), 0, 0, 0, liveId])
   })
 
+  it('circuit breaker abre após 5 erros e emite health event', async () => {
+    const liveId = 'live-cb-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    const healthEvents = []
+    getEmitter().on(`health:${liveId}`, (evt) => healthEvents.push(evt))
+
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const errorCall = connection.on.mock.calls.find(([evt]) => evt === 'error')
+    expect(errorCall).toBeDefined()
+    const errorHandler = errorCall[1]
+
+    // 4 erros — abaixo do threshold
+    for (let i = 0; i < 4; i++) errorHandler(new Error(`err ${i}`))
+    expect(healthEvents.length).toBe(0)
+
+    // 5º erro — circuit breaker abre
+    errorHandler(new Error('err 5'))
+
+    // Aguarda microtask pro UPDATE lives async
+    await new Promise(r => setImmediate(r))
+
+    expect(healthEvents.length).toBe(1)
+    expect(healthEvents[0]).toMatchObject({
+      type: 'connector_degraded',
+      liveId,
+      errorCount: 5,
+    })
+
+    // UPDATE lives foi chamado com 'degraded'
+    const updateCall = db.query.mock.calls.find(([sql, params]) =>
+      sql.includes('tiktok_connector_status') &&
+      sql.includes("'degraded'") &&
+      Array.isArray(params) && params.includes(liveId)
+    )
+    expect(updateCall).toBeDefined()
+  })
+
   it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
     const liveId = 'live-flush-1'
     const db = makeDb([

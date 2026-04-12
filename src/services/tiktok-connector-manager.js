@@ -11,6 +11,8 @@ _emitter.setMaxListeners(0) // Unlimited — SSE clients each add one listener p
 
 const MAX_CONNECTORS = Number(process.env.TIKTOK_MAX_CONNECTORS ?? 20)
 const FLUSH_INTERVAL_MS = 30_000
+const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.TIKTOK_CB_THRESHOLD ?? 5)
+const CIRCUIT_BREAKER_WINDOW_MS = Number(process.env.TIKTOK_CB_WINDOW_MS ?? 5 * 60_000)
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -229,6 +231,34 @@ async function startConnector(liveId, tenantId, username) {
 
   connection.on('error', (err) => {
     _log?.warn({ err, liveId, username }, 'tiktokManager: erro no connector')
+
+    // Circuit breaker: janela deslizante de erros
+    const now = Date.now()
+    if (now - state.errorWindowStart > CIRCUIT_BREAKER_WINDOW_MS) {
+      state.errorWindowStart = now
+      state.errorCount = 0
+    }
+    state.errorCount += 1
+
+    if (state.errorCount >= CIRCUIT_BREAKER_THRESHOLD && !state.circuitOpen) {
+      state.circuitOpen = true
+      _log?.error(
+        { liveId, username, errorCount: state.errorCount },
+        'tiktokManager: CIRCUIT BREAKER OPEN — connector em estado degradado'
+      )
+      _emitter.emit(`health:${liveId}`, {
+        type: 'connector_degraded',
+        liveId,
+        errorCount: state.errorCount,
+        ts: now,
+      })
+      _db.query(
+        `UPDATE lives SET tiktok_connector_status = 'degraded' WHERE id = $1`,
+        [liveId]
+      ).catch(updateErr => {
+        _log?.error({ err: updateErr, liveId }, 'tiktokManager: falha ao marcar degraded')
+      })
+    }
   })
   // ─────────────────────────────────────────────────────────────────────────
 
