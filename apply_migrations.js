@@ -42,6 +42,7 @@ async function main() {
     '023_billing_batch_setup.sql',
     '025_create_live_requests.sql',
     '026_add_analytics_dashboard_indexes.sql',
+    '029_lives_tiktok_fields.sql',
   ]
 
   for (const migration of pendingMigrations) {
