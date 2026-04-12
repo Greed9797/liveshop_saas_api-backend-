@@ -156,6 +156,28 @@ async function startConnector(liveId, tenantId, username) {
     })
   })
 
+  connection.on('gift', (data) => {
+    // giftType === 1 + repeatEnd === false  → streak em progresso (ignorar)
+    // giftType === 1 + repeatEnd === true   → streak finalizado (conta multiplicado)
+    // giftType !== 1                        → gift único
+    if (data.giftType === 1 && !data.repeatEnd) return
+
+    const multiplier = data.giftType === 1 ? (data.repeatCount ?? 1) : 1
+    const diamonds = (data.diamondCount ?? 0) * multiplier
+
+    state.gifts_diamonds += diamonds
+    state.dirty = true
+
+    _emitter.emit(`event:${liveId}`, {
+      type: 'gift',
+      user: data.uniqueId,
+      giftName: data.giftName,
+      diamonds,
+      repeatCount: data.repeatCount ?? 1,
+      ts: Date.now(),
+    })
+  })
+
   connection.on('disconnected', () => {
     _log?.warn({ liveId, username }, 'tiktokManager: connector desconectado — cron reconectará')
     const entry = _liveMap.get(liveId)

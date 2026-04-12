@@ -87,6 +87,53 @@ describe('TikTokConnectorManager', () => {
     expect(e1).toBe(e2)
   })
 
+  it('handler gift acumula diamantes e emite event:liveId', async () => {
+    const liveId = 'live-gift-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    const receivedEvents = []
+    getEmitter().on(`event:${liveId}`, (evt) => receivedEvents.push(evt))
+
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const giftCall = connection.on.mock.calls.find(([evt]) => evt === 'gift')
+    expect(giftCall).toBeDefined()
+    const giftHandler = giftCall[1]
+
+    // Streak em progresso — NÃO deve contar
+    giftHandler({
+      giftType: 1, repeatEnd: false, repeatCount: 3,
+      diamondCount: 10, uniqueId: 'alice', giftName: 'Rose',
+    })
+    expect(receivedEvents.length).toBe(0)
+
+    // Streak finalizado — conta multiplicado
+    giftHandler({
+      giftType: 1, repeatEnd: true, repeatCount: 3,
+      diamondCount: 10, uniqueId: 'alice', giftName: 'Rose',
+    })
+    expect(receivedEvents.length).toBe(1)
+    expect(receivedEvents[0]).toMatchObject({
+      type: 'gift', user: 'alice', giftName: 'Rose', diamonds: 30, repeatCount: 3,
+    })
+
+    // Gift único (não-streak) — conta imediato
+    giftHandler({
+      giftType: 2, diamondCount: 50,
+      uniqueId: 'bob', giftName: 'Galaxy',
+    })
+    expect(receivedEvents.length).toBe(2)
+    expect(receivedEvents[1]).toMatchObject({
+      type: 'gift', user: 'bob', giftName: 'Galaxy', diamonds: 50,
+    })
+  })
+
   it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
     const liveId = 'live-flush-1'
     const db = makeDb([
