@@ -71,6 +71,32 @@ export async function stopConnector(liveId) {
   clearInterval(entry.flushTimer)
   await _flushToDb(liveId, entry)
 
+  // Preencher cache denormalizado em `lives` com métricas finais.
+  // Escrita acontece uma vez por live (não path crítico), acelera reads do dashboard
+  // sem exigir agregação de live_snapshots.
+  try {
+    await _db.query(`
+      UPDATE lives
+      SET final_peak_viewers   = $1,
+          final_total_likes    = $2,
+          final_total_comments = $3,
+          final_total_shares   = $4,
+          final_gifts_diamonds = $5,
+          final_orders_count   = $6
+      WHERE id = $7
+    `, [
+      entry.state.total_viewers,
+      entry.state.likes_count,
+      entry.state.comments_count,
+      entry.state.shares_count,
+      entry.state.gifts_diamonds,
+      entry.state.total_orders,
+      liveId,
+    ])
+  } catch (err) {
+    _log?.error({ err, liveId }, 'tiktokManager: falha ao atualizar final_* em lives')
+  }
+
   try {
     await entry.connection.disconnect()
   } catch (err) {

@@ -216,6 +216,44 @@ describe('TikTokConnectorManager', () => {
     expect(chatEvt).toMatchObject({ type: 'chat', user: 'eve', comment: 'adorei a live' })
   })
 
+  it('stopConnector popula final_* em lives', async () => {
+    const liveId = 'live-final-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    // Mutate state via handlers pra ter valores não-zero pra gravar
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const roomUserHandler = connection.on.mock.calls.find(([evt]) => evt === 'roomUser')[1]
+    const likeHandler = connection.on.mock.calls.find(([evt]) => evt === 'like')[1]
+
+    roomUserHandler({ viewerCount: 100 })
+    likeHandler({ likeCount: 5 })
+
+    // Limpa queries feitas no start
+    db.query.mockClear()
+    db.query.mockResolvedValue({ rows: [] })
+
+    await stopConnector(liveId)
+
+    const updateCall = db.query.mock.calls.find(([sql]) =>
+      sql.includes('UPDATE lives') && sql.includes('final_peak_viewers')
+    )
+    expect(updateCall).toBeDefined()
+    expect(updateCall[0]).toContain('final_total_likes')
+    expect(updateCall[0]).toContain('final_total_comments')
+    expect(updateCall[0]).toContain('final_total_shares')
+    expect(updateCall[0]).toContain('final_gifts_diamonds')
+    expect(updateCall[0]).toContain('final_orders_count')
+    // Verifica que passou os valores acumulados (peak = 100, likes = 5)
+    expect(updateCall[1]).toEqual([100, 5, expect.any(Number), 0, 0, 0, liveId])
+  })
+
   it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
     const liveId = 'live-flush-1'
     const db = makeDb([
