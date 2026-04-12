@@ -626,4 +626,68 @@ describe('Route regressions: SQL and RBAC', () => {
 
     await app.close()
   })
+
+  // ── TikTok OAuth CSRF regression ─────────────────────────────────────────
+  describe('TikTok OAuth CSRF (signed state)', () => {
+    async function buildTiktokApp() {
+      process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
+      const app = Fastify()
+      const queryMock = vi.fn().mockResolvedValue({ rowCount: 1, rows: [{ id: 'tenant-1' }] })
+      const releaseMock = vi.fn()
+      app.decorate('authenticate', async (request) => {
+        request.user = { tenant_id: '00000000-0000-0000-0000-000000000001', papel: 'franqueado' }
+      })
+      app.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!request.user) request.user = { tenant_id: '00000000-0000-0000-0000-000000000001', papel: 'franqueado' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      app.decorate('db', { query: queryMock })
+      app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+      const { tiktokRoutes } = await import('../src/routes/tiktok.js')
+      await app.register(tiktokRoutes)
+      return { app, queryMock }
+    }
+
+    it('GET /v1/tiktok/callback rejeita state sem assinatura (formato UUID)', async () => {
+      const { app } = await buildTiktokApp()
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/tiktok/callback?code=fake&state=00000000-0000-0000-0000-000000000001',
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error).toMatch(/State inválido/)
+      await app.close()
+    })
+
+    it('GET /v1/tiktok/callback rejeita state com assinatura tampered', async () => {
+      const { app } = await buildTiktokApp()
+      const res = await app.inject({
+        method: 'GET',
+        url: '/v1/tiktok/callback?code=fake&state=tenant-1:nonce:9999999999999:BADSIG1234567890',
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().error).toMatch(/State inválido/)
+      await app.close()
+    })
+
+    it('GET /v1/tiktok/callback aceita signed state válido gerado por createSignedState', async () => {
+      const { app, queryMock } = await buildTiktokApp()
+      const { createSignedState } = await import('../src/services/oauth-state.js')
+      const validState = createSignedState({
+        tenantId: '00000000-0000-0000-0000-000000000001',
+        nonce: 'test-nonce',
+      })
+      const res = await app.inject({
+        method: 'GET',
+        url: `/v1/tiktok/callback?code=fake&state=${encodeURIComponent(validState)}`,
+      })
+      // Callback roda com sucesso (retorna HTML de "conectado") ou 404 se tenant não existe.
+      // Nosso mock retorna rowCount=1 (tenant existe), então deve ter status 200 com HTML.
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-type']).toMatch(/text\/html/)
+      // Deve ter chamado db.query pra verificar tenant + atualizar tokens
+      expect(queryMock).toHaveBeenCalled()
+      await app.close()
+    })
+  })
 })

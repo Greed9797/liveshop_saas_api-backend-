@@ -3,7 +3,9 @@
  * Responsável por conectar a conta do TikTok do Franqueado e gerar os Tokens
  */
 
+import crypto from 'node:crypto'
 import { getEmitter } from '../services/tiktok-connector-manager.js'
+import { createSignedState, verifySignedState } from '../services/oauth-state.js'
 
 export async function tiktokRoutes(app) {
   // Configuração do App do TikTok (seria definido no .env na versão de produção)
@@ -17,8 +19,10 @@ export async function tiktokRoutes(app) {
    * Gera a URL de OAuth do TikTok e retorna para o Frontend (Painel do Franqueado)
    */
   app.get('/v1/tiktok/connect', { preHandler: [app.authenticate, app.requirePapel(['franqueado'])] }, async (request, reply) => {
-    // Usamos o tenantId no state para saber de qual tenant é esse callback
-    const state = request.user.tenant_id;
+    // CSRF signed state (HMAC + TTL 10 min) — previne replay e tampering.
+    // Substitui o padrão antigo que usava tenant_id raw (vulnerável a CSRF).
+    const nonce = crypto.randomBytes(8).toString('hex');
+    const state = createSignedState({ tenantId: request.user.tenant_id, nonce });
     const scope = 'live.info.read,live.commerce.read'; // Escopos necessários
     const responseType = 'code';
 
@@ -44,15 +48,14 @@ export async function tiktokRoutes(app) {
       return reply.code(400).send({ error: 'Parâmetros code e state são obrigatórios' });
     }
 
-    const tenantId = state;
-
-    // Validar que state é um UUID válido antes de usar como tenant_id.
-    // TODO: quando a integração real TikTok ativar, substituir por HMAC-signed token
-    // que contenha tenant_id + timestamp + nonce para prevenir CSRF.
-    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    if (!uuidRe.test(tenantId)) {
-      return reply.code(400).send({ error: 'State inválido' })
+    // Verifica signed state (HMAC + TTL 10 min). Rejeita se tampered ou expirado.
+    const verified = verifySignedState(state)
+    if (!verified) {
+      app.log.warn({ state: typeof state === 'string' ? state.slice(0, 8) : null },
+        '[TikTok OAuth] state inválido ou expirado')
+      return reply.code(400).send({ error: 'State inválido ou expirado' })
     }
+    const tenantId = verified.tenantId
 
     try {
       // Verificar que o tenant existe antes de atualizar credenciais
