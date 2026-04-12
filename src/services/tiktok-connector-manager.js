@@ -178,6 +178,16 @@ async function startConnector(liveId, tenantId, username) {
     })
   })
 
+  connection.on('share', (data) => {
+    state.shares_count += 1
+    state.dirty = true
+    _emitter.emit(`event:${liveId}`, {
+      type: 'share',
+      user: data.uniqueId,
+      ts: Date.now(),
+    })
+  })
+
   connection.on('disconnected', () => {
     _log?.warn({ liveId, username }, 'tiktokManager: connector desconectado — cron reconectará')
     const entry = _liveMap.get(liveId)

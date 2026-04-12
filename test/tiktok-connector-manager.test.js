@@ -134,6 +134,33 @@ describe('TikTokConnectorManager', () => {
     })
   })
 
+  it('handler share incrementa shares_count e emite event:liveId', async () => {
+    const liveId = 'live-share-1'
+    const db = makeDb([
+      { id: liveId, tenant_id: 'tenant-1', tiktok_username: 'user_test' },
+    ])
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() }
+    init({ db, log })
+
+    await syncLives()
+
+    const receivedEvents = []
+    getEmitter().on(`event:${liveId}`, (evt) => receivedEvents.push(evt))
+
+    const { WebcastPushConnection } = await import('tiktok-live-connector')
+    const connection = WebcastPushConnection.mock.instances.at(-1)
+    const shareCall = connection.on.mock.calls.find(([evt]) => evt === 'share')
+    expect(shareCall).toBeDefined()
+    const shareHandler = shareCall[1]
+
+    shareHandler({ uniqueId: 'carol' })
+    shareHandler({ uniqueId: 'dave' })
+
+    expect(receivedEvents.length).toBe(2)
+    expect(receivedEvents[0]).toMatchObject({ type: 'share', user: 'carol' })
+    expect(receivedEvents[1]).toMatchObject({ type: 'share', user: 'dave' })
+  })
+
   it('_flushToDb persiste gifts_diamonds e shares_count nos snapshots', async () => {
     const liveId = 'live-flush-1'
     const db = makeDb([
