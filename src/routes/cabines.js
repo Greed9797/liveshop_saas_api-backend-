@@ -226,6 +226,32 @@ export async function cabinesRoutes(app) {
     }
   })
 
+  // PATCH /v1/cabines/:id/liberar — desvincula contrato e libera cabine para deleção
+  app.patch('/v1/cabines/:id/liberar', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const { rows } = await db.query(
+        `SELECT id, status, live_atual_id FROM cabines WHERE id = $1`,
+        [request.params.id]
+      )
+      const cabine = rows[0]
+      if (!cabine) return reply.code(404).send({ error: 'Cabine não encontrada' })
+      if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
+        return reply.code(409).send({ error: 'Não é possível liberar uma cabine ao vivo' })
+      }
+      await db.query(
+        `UPDATE cabines SET contrato_id = NULL, status = 'disponivel' WHERE id = $1`,
+        [request.params.id]
+      )
+      return { ok: true }
+    } finally {
+      db.release()
+    }
+  })
+
   // PATCH /v1/cabines/:id — update name, size, description
   app.patch('/v1/cabines/:id', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const parsed = atualizarCabineSchema.safeParse(request.body)
