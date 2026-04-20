@@ -32,7 +32,12 @@ export async function clienteDashboardRoutes(app) {
           faturamento_mes: 0,
           crescimento_pct: 0,
           volume_vendas: 0,
-          lucro_estimado: 0,
+          horas_mes: 0,
+          roas_mes: null,
+          pacote: null,
+          faturamento_por_mes: [],
+          top_horarios: [],
+          top_dias_semana: [],
           live_ativa: null,
           mais_vendidos: [],
           ranking_dia: null,
@@ -42,32 +47,43 @@ export async function clienteDashboardRoutes(app) {
         }
       }
 
-      // 2. Busca o contrato ativo para saber o % de comissão do cliente
+      // 2. Busca o contrato ativo + pacote vinculado
       const contratoQ = await db.query(`
-        SELECT id, comissao_pct, ativado_em, assinado_em
-        FROM contratos 
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'ativo' 
-        ORDER BY ativado_em DESC NULLS LAST, criado_em DESC
+        SELECT c.id, c.comissao_pct, c.ativado_em, c.assinado_em,
+               c.valor_fixo, c.pacote_id,
+               p.valor AS pacote_valor, p.horas_incluidas
+        FROM contratos c
+        LEFT JOIN pacotes p ON p.id = c.pacote_id
+        WHERE c.tenant_id = $1
+          AND c.cliente_id = $2
+          AND c.status = 'ativo'
+        ORDER BY c.ativado_em DESC NULLS LAST, c.criado_em DESC
         LIMIT 1
       `, [tenant_id, cliente_id])
-      const comissaoPct = Number(contratoQ.rows[0]?.comissao_pct || 0)
+      const contratoRow = contratoQ.rows[0]
+      const comissaoPct = Number(contratoRow?.comissao_pct || 0)
+      const custoPacote = Number(contratoRow?.pacote_valor ?? contratoRow?.valor_fixo ?? 0)
+      const pacoteInfo = contratoRow ? {
+        valor: custoPacote,
+        horas_incluidas: Number(contratoRow.horas_incluidas ?? 0),
+        valor_fixo_contrato: Number(contratoRow.valor_fixo ?? 0),
+      } : null
 
-      // 3. Faturamento e Comissão do Mês (Apenas lives encerradas)
+      // 3. Faturamento e Horas do Mês (Apenas lives encerradas)
       const mesQ = await db.query(`
-        SELECT 
+        SELECT
           COALESCE(SUM(fat_gerado), 0) AS faturamento_mes,
-          COALESCE(SUM(comissao_calculada), 0) AS lucro_estimado
-        FROM lives 
+          COALESCE(SUM(duracao_min), 0) / 60.0 AS horas_mes
+        FROM lives
         WHERE tenant_id = $1
-          AND cliente_id = $2 
+          AND cliente_id = $2
           AND status = 'encerrada'
           AND date_trunc('month', encerrado_em) = date_trunc('month', NOW())
       `, [tenant_id, cliente_id])
-      
+
       const faturamentoMes = Number(mesQ.rows[0].faturamento_mes)
-      const lucroEstimado = Number(mesQ.rows[0].lucro_estimado)
+      const horasMes = Number(mesQ.rows[0].horas_mes)
+      const roasMes = custoPacote > 0 ? Number((faturamentoMes / custoPacote).toFixed(2)) : null
 
       // 4. Crescimento mês atual vs anterior (Baseado no faturamento)
       const crescQ = await db.query(`
@@ -87,7 +103,58 @@ export async function clienteDashboardRoutes(app) {
         ? Math.round(((Number(c.mes_atual) - Number(c.mes_anterior)) / Number(c.mes_anterior)) * 100)
         : 0
 
-      // 5. Verifica se há uma Live Ativa agora e pega os dados do TikTok (Snapshots)
+      // 5a. Faturamento por mês (últimos 12 meses)
+      const fatMensalQ = await db.query(`
+        SELECT
+          to_char(date_trunc('month', encerrado_em), 'YYYY-MM') AS mes,
+          COALESCE(SUM(fat_gerado), 0) AS gmv
+        FROM lives
+        WHERE tenant_id = $1
+          AND cliente_id = $2
+          AND status = 'encerrada'
+          AND encerrado_em >= NOW() - interval '12 months'
+        GROUP BY date_trunc('month', encerrado_em)
+        ORDER BY mes ASC
+      `, [tenant_id, cliente_id])
+      const faturamentoPorMes = fatMensalQ.rows.map(r => ({ mes: r.mes, gmv: Number(r.gmv) }))
+
+      // 5b. Top horários (últimos 90 dias)
+      const topHorariosQ = await db.query(`
+        SELECT
+          EXTRACT(HOUR FROM iniciado_em)::int AS hora,
+          COALESCE(SUM(fat_gerado), 0) AS gmv_total,
+          COUNT(*)::int AS total_lives
+        FROM lives
+        WHERE tenant_id = $1
+          AND cliente_id = $2
+          AND status = 'encerrada'
+          AND iniciado_em >= CURRENT_DATE - interval '90 days'
+        GROUP BY hora
+        ORDER BY hora
+      `, [tenant_id, cliente_id])
+      const topHorarios = topHorariosQ.rows.map(r => ({
+        hora: r.hora, gmv_total: Number(r.gmv_total), total_lives: r.total_lives,
+      }))
+
+      // 5c. Top dias da semana (0=Dom..6=Sab, últimos 90 dias)
+      const topDiasQ = await db.query(`
+        SELECT
+          EXTRACT(DOW FROM iniciado_em)::int AS dia_semana,
+          COALESCE(SUM(fat_gerado), 0) AS gmv_total,
+          COUNT(*)::int AS total_lives
+        FROM lives
+        WHERE tenant_id = $1
+          AND cliente_id = $2
+          AND status = 'encerrada'
+          AND iniciado_em >= CURRENT_DATE - interval '90 days'
+        GROUP BY dia_semana
+        ORDER BY dia_semana
+      `, [tenant_id, cliente_id])
+      const topDiasSemana = topDiasQ.rows.map(r => ({
+        dia_semana: r.dia_semana, gmv_total: Number(r.gmv_total), total_lives: r.total_lives,
+      }))
+
+      // 6. Verifica se há uma Live Ativa agora e pega os dados do TikTok (Snapshots)
       const liveQ = await db.query(`
         SELECT 
           l.id, l.iniciado_em,
@@ -126,7 +193,7 @@ export async function clienteDashboardRoutes(app) {
         }
       }
 
-      // 6. Produtos Mais Vendidos do Mês (Agrupado por nome)
+      // 7. Produtos Mais Vendidos do Mês (Agrupado por nome)
       const produtosQ = await db.query(`
         SELECT 
           lp.produto_nome AS produto, 
@@ -151,7 +218,7 @@ export async function clienteDashboardRoutes(app) {
       // Calcula volume total de vendas de itens do mês
       const volumeVendas = maisVendidos.reduce((acc, curr) => acc + curr.qty, 0)
 
-      // 7. Ranking do Dia
+      // 8. Ranking do Dia
       const rankQ = await db.query(`
         SELECT cliente_id, SUM(fat_gerado) AS total,
                RANK() OVER (ORDER BY SUM(fat_gerado) DESC) AS posicao,
@@ -173,7 +240,7 @@ export async function clienteDashboardRoutes(app) {
         }
       }
 
-      // 8. Próxima reserva operacional (cabine já vinculada para próxima operação)
+      // 9. Próxima reserva operacional (cabine já vinculada para próxima operação)
       const proximaReservaQ = await db.query(`
         SELECT
           c.id AS cabine_id,
@@ -202,7 +269,7 @@ export async function clienteDashboardRoutes(app) {
           }
         : null
 
-      // 9. Benchmark anônimo do ecossistema (últimos 90 dias)
+      // 10. Benchmark anônimo do ecossistema (últimos 90 dias)
       const benchmarkQ = await db.query(`
         WITH base_90_dias AS (
           SELECT
@@ -321,21 +388,107 @@ export async function clienteDashboardRoutes(app) {
       })
 
       return {
-        faturamento_mes: faturamentoMes,
-        crescimento_pct: crescimento,
-        volume_vendas:   volumeVendas,
-        lucro_estimado:  lucroEstimado,
-        live_ativa:      liveAtiva,
-        mais_vendidos:   maisVendidos,
-        ranking_dia:     rankingDia,
-        proxima_reserva: proximaReserva,
-        benchmark_nicho: benchmarkNicho,
-        benchmark_geral: benchmarkGeral,
+        faturamento_mes:    faturamentoMes,
+        crescimento_pct:    crescimento,
+        volume_vendas:      volumeVendas,
+        horas_mes:          Number(horasMes.toFixed(1)),
+        roas_mes:           roasMes,
+        pacote:             pacoteInfo,
+        faturamento_por_mes: faturamentoPorMes,
+        top_horarios:       topHorarios,
+        top_dias_semana:    topDiasSemana,
+        live_ativa:         liveAtiva,
+        mais_vendidos:      maisVendidos,
+        ranking_dia:        rankingDia,
+        proxima_reserva:    proximaReserva,
+        benchmark_nicho:    benchmarkNicho,
+        benchmark_geral:    benchmarkGeral,
       }
 
     } catch (e) {
       app.log.error({ err: e }, 'unhandled error')
       throw e
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/cliente/lives — lives detalhadas com métricas de engajamento por mês
+  app.get('/v1/cliente/lives', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const userQ = await db.query(
+        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+        [user_id, tenant_id]
+      )
+      const email = userQ.rows[0]?.email
+
+      const clienteQ = await db.query(
+        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
+        [tenant_id, email]
+      )
+      const cliente_id = clienteQ.rows[0]?.id
+      if (!cliente_id) return { lives: [] }
+
+      const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
+      const ano = Number(request.query.ano) || new Date().getFullYear()
+
+      const livesQ = await db.query(`
+        SELECT
+          l.id, l.iniciado_em, l.encerrado_em,
+          c.numero AS cabine_numero,
+          EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60 AS duracao_min,
+          COALESCE(snap.viewer_count, 0)   AS viewer_count,
+          COALESCE(snap.comments_count, 0) AS comments_count,
+          COALESCE(snap.likes_count, 0)    AS likes_count,
+          COALESCE(snap.shares_count, 0)   AS shares_count,
+          COALESCE(snap.total_orders, 0)   AS total_orders,
+          COALESCE(l.fat_gerado, 0)        AS fat_gerado,
+          (
+            SELECT lp.produto_nome
+            FROM live_products lp
+            WHERE lp.live_id = l.id
+            GROUP BY lp.produto_nome
+            ORDER BY SUM(lp.quantidade) DESC
+            LIMIT 1
+          ) AS top_produto
+        FROM lives l
+        JOIN cabines c ON c.id = l.cabine_id
+        LEFT JOIN LATERAL (
+          SELECT viewer_count, comments_count, likes_count, shares_count, total_orders
+          FROM live_snapshots
+          WHERE live_id = l.id
+          ORDER BY captured_at DESC
+          LIMIT 1
+        ) snap ON true
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND EXTRACT(MONTH FROM l.iniciado_em) = $3
+          AND EXTRACT(YEAR FROM l.iniciado_em) = $4
+          AND l.status IN ('encerrada', 'em_andamento')
+        ORDER BY l.iniciado_em DESC
+      `, [tenant_id, cliente_id, mes, ano])
+
+      return {
+        lives: livesQ.rows.map(r => ({
+          id:              r.id,
+          iniciado_em:     r.iniciado_em,
+          encerrado_em:    r.encerrado_em,
+          cabine_numero:   Number(r.cabine_numero),
+          duracao_min:     Math.round(Number(r.duracao_min)),
+          viewer_count:    Number(r.viewer_count),
+          comments_count:  Number(r.comments_count),
+          likes_count:     Number(r.likes_count),
+          shares_count:    Number(r.shares_count),
+          total_orders:    Number(r.total_orders),
+          fat_gerado:      Number(r.fat_gerado),
+          top_produto:     r.top_produto ?? null,
+        })),
+      }
     } finally {
       db.release()
     }

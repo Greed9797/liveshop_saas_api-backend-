@@ -406,9 +406,12 @@ describe('Route regressions: SQL and RBAC', () => {
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ email: 'parceiro@teste.com' }] })
       .mockResolvedValueOnce({ rows: [{ id: 'cli-1', nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '12.50', ativado_em: '2026-04-03T20:00:00.000Z', assinado_em: '2026-04-01T15:00:00.000Z' }] })
-      .mockResolvedValueOnce({ rows: [{ faturamento_mes: '8200.00', lucro_estimado: '1230.00' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '12.50', ativado_em: '2026-04-03T20:00:00.000Z', assinado_em: '2026-04-01T15:00:00.000Z', valor_fixo: '0.00', pacote_id: null, pacote_valor: null, horas_incluidas: null }] })
+      .mockResolvedValueOnce({ rows: [{ faturamento_mes: '8200.00', horas_mes: '20.00' }] })
       .mockResolvedValueOnce({ rows: [{ mes_atual: '8200.00', mes_anterior: '7300.00' }] })
+      .mockResolvedValueOnce({ rows: [{ mes: '2026-04', gmv: '8200.00' }] })
+      .mockResolvedValueOnce({ rows: [{ hora: 20, gmv_total: '4000.00', total_lives: 3 }] })
+      .mockResolvedValueOnce({ rows: [{ dia_semana: 5, gmv_total: '6000.00', total_lives: 4 }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ produto: 'Vestido', qty: '12', valor: '4500.00' }] })
       .mockResolvedValueOnce({ rows: [{ cliente_id: 'cli-1', total: '1200.00', posicao: '2', total_participantes: '14' }] })
@@ -433,20 +436,15 @@ describe('Route regressions: SQL and RBAC', () => {
       faturamento_mes: 8200,
       crescimento_pct: 12,
       volume_vendas: 12,
-      lucro_estimado: 1230,
+      horas_mes: 20,
+      roas_mes: null,
+      pacote: { valor: 0, horas_incluidas: 0, valor_fixo_contrato: 0 },
+      faturamento_por_mes: [{ mes: '2026-04', gmv: 8200 }],
+      top_horarios: [{ hora: 20, gmv_total: 4000, total_lives: 3 }],
+      top_dias_semana: [{ dia_semana: 5, gmv_total: 6000, total_lives: 4 }],
       live_ativa: null,
-      mais_vendidos: [
-        {
-          produto: 'Vestido',
-          qty: 12,
-          valor: 4500,
-        },
-      ],
-      ranking_dia: {
-        posicao: 2,
-        gmv_dia: 1200,
-        total_participantes: 14,
-      },
+      mais_vendidos: [{ produto: 'Vestido', qty: 12, valor: 4500 }],
+      ranking_dia: { posicao: 2, gmv_dia: 1200, total_participantes: 14 },
       proxima_reserva: {
         cabine_id: 'cab-3',
         cabine_numero: 3,
@@ -475,11 +473,11 @@ describe('Route regressions: SQL and RBAC', () => {
       },
     })
 
-    const rankingSql = queryMock.mock.calls[7][0]
+    const rankingSql = queryMock.mock.calls[10][0]
     expect(rankingSql).toContain('WHERE tenant_id = $1')
     expect(rankingSql).toContain("date_trunc('day', iniciado_em) = date_trunc('day', NOW())")
 
-    const benchmarkSql = queryMock.mock.calls[9][0]
+    const benchmarkSql = queryMock.mock.calls[12][0]
     expect(benchmarkSql).toContain('WITH base_90_dias AS')
     expect(benchmarkSql).toContain('PERCENT_RANK() OVER')
     expect(releaseMock).toHaveBeenCalledTimes(1)
