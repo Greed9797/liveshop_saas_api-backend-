@@ -32,15 +32,49 @@ export class TikTokService {
   /**
    * Renova token de acesso se expirado (OAuth 2.0 TikTok)
    */
-  static async refreshToken(tenantId, refreshToken, db) {
+  static async refreshToken(db, tenantId, currentRefreshToken) {
+    const clientKey    = process.env.TIKTOK_CLIENT_KEY
+    const clientSecret = process.env.TIKTOK_CLIENT_SECRET
+    if (!clientKey || !clientSecret) {
+      console.warn(`[TikTok] Credenciais OAuth ausentes — não é possível renovar token do tenant ${tenantId}`)
+      return false
+    }
     try {
-      // POST https://open.tiktokapis.com/v2/oauth/token/
-      console.log(`[TikTok] Renovando token para o tenant: ${tenantId}`);
-      // Lógica futura: atualizar tiktok_access_token e tiktok_refresh_token no banco
-      return true;
+      const res = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_key: clientKey,
+          client_secret: clientSecret,
+          grant_type: 'refresh_token',
+          refresh_token: currentRefreshToken,
+        }).toString(),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error_description ?? data.error)
+
+      const expiresAt = new Date(Date.now() + data.expires_in * 1000)
+      await db.query(
+        `UPDATE tenants SET tiktok_access_token=$1, tiktok_refresh_token=$2, tiktok_token_expires_at=$3 WHERE id=$4`,
+        [data.access_token, data.refresh_token, expiresAt, tenantId]
+      )
+      console.log(`[TikTok] Token renovado para tenant ${tenantId}`)
+      return true
     } catch (error) {
-      console.error(`[TikTok] Erro ao renovar token do tenant ${tenantId}:`, error);
-      return false;
+      console.error(`[TikTok] Erro ao renovar token do tenant ${tenantId}:`, error.message)
+      return false
+    }
+  }
+
+  static async refreshAllExpiringTokens(db) {
+    const { rows } = await db.query(`
+      SELECT id, tiktok_refresh_token FROM tenants
+      WHERE tiktok_access_token IS NOT NULL
+        AND tiktok_refresh_token IS NOT NULL
+        AND tiktok_token_expires_at < NOW() + INTERVAL '7 days'
+    `)
+    for (const tenant of rows) {
+      await TikTokService.refreshToken(db, tenant.id, tenant.tiktok_refresh_token)
     }
   }
 

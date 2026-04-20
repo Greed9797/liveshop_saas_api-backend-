@@ -8,9 +8,9 @@ export async function manuaisRoutes(app) {
     { onRequest: [app.authenticate] },
     async (_req, reply) => {
       const { rows } = await app.db.query(`
-        SELECT id, titulo, url, atualizado_em
+        SELECT id, titulo, url, atualizado_em, categoria, paginas, destaque
         FROM manuais
-        ORDER BY atualizado_em DESC
+        ORDER BY destaque DESC, atualizado_em DESC
       `)
       return reply.send(rows)
     }

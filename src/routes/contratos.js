@@ -4,37 +4,83 @@ const createSchema = z.object({
   cliente_id:   z.string().uuid(),
   valor_fixo:   z.number().min(0),
   comissao_pct: z.number().min(0).max(100),
+  pacote_id:    z.string().uuid().optional(),
 })
 
 export async function contratosRoutes(app) {
-  // POST /v1/contratos
-  app.post('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
-    const parsed = createSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+  // POST /v1/contratos/quick — cria contrato rascunho com defaults (sem valor_fixo obrigatório)
+  app.post('/v1/contratos/quick', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+    const { cliente_id, pacote_id } = request.body ?? {}
+    if (!cliente_id || typeof cliente_id !== 'string') {
+      return reply.code(400).send({ error: 'cliente_id é obrigatório' })
+    }
 
     const { tenant_id, sub } = request.user
-    const { cliente_id, valor_fixo, comissao_pct } = parsed.data
+    const db = await app.dbTenant(tenant_id)
+    try {
+      let valor_fixo = 0
+      let comissao_pct = 0
+
+      if (pacote_id) {
+        const pacoteQ = await db.query(
+          `SELECT valor_fixo, comissao_pct FROM pacotes WHERE id = $1 AND tenant_id = $2`,
+          [pacote_id, tenant_id]
+        )
+        if (!pacoteQ.rows[0]) return reply.code(400).send({ error: 'Pacote não encontrado' })
+        valor_fixo = Number(pacoteQ.rows[0].valor_fixo)
+        comissao_pct = Number(pacoteQ.rows[0].comissao_pct)
+      }
+
+      const result = await db.query(
+        `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, cliente_id, status`,
+        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally { db.release() }
+  })
+
+  // POST /v1/contratos
+  app.post('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+    const parsed = createSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id, sub } = request.user
+    const { cliente_id, valor_fixo, comissao_pct, pacote_id } = parsed.data
 
     const db = await app.dbTenant(tenant_id)
     try {
+      let horasContratadas = 0
+      if (pacote_id) {
+        const pacoteQ = await db.query(
+          `SELECT horas_incluidas FROM pacotes WHERE id = $1 AND tenant_id = $2`,
+          [pacote_id, tenant_id]
+        )
+        if (!pacoteQ.rows[0]) return reply.code(400).send({ error: 'Pacote não encontrado' })
+        horasContratadas = Number(pacoteQ.rows[0].horas_incluidas)
+      }
+
       const result = await db.query(
-        `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id, status, criado_em`,
-        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct]
+        `INSERT INTO contratos (tenant_id, cliente_id, user_id, valor_fixo, comissao_pct, pacote_id, horas_contratadas)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id, status, criado_em, pacote_id, horas_contratadas, horas_consumidas,
+                   (horas_contratadas - horas_consumidas) AS horas_restantes`,
+        [tenant_id, cliente_id, sub, valor_fixo, comissao_pct, pacote_id ?? null, horasContratadas]
       )
       return reply.code(201).send(result.rows[0])
     } finally { db.release() }
   })
 
   // GET /v1/contratos — lista todos os contratos do tenant
-  app.get('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
+  app.get('/v1/contratos', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(`
         SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
                c.de_risco, c.assinado_em, c.ativado_em, c.cancelado_em,
-               c.criado_em,
+               c.criado_em, c.pacote_id, c.horas_contratadas, c.horas_consumidas,
+               (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
                cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
                cl.nicho AS cliente_nicho
         FROM contratos c
@@ -46,12 +92,14 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/contratos/:id — detalhe de um contrato
-  app.get('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.get('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(`
-        SELECT c.*, cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
+        SELECT c.*,
+               (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
+               cl.nome AS cliente_nome, cl.cnpj AS cliente_cnpj,
                cl.fat_anual AS cliente_fat_anual, cl.nicho AS cliente_nicho,
                cl.score AS cliente_score, cl.email AS cliente_email,
                cl.celular AS cliente_celular
@@ -64,8 +112,54 @@ export async function contratosRoutes(app) {
     } finally { db.release() }
   })
 
+  // PATCH /v1/contratos/:id — edita pacote/valores de um contrato em rascunho
+  app.patch('/v1/contratos/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { pacote_id, valor_fixo, comissao_pct } = request.body ?? {}
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      let horasContratadas = null
+      if (pacote_id !== undefined) {
+        if (pacote_id === null) {
+          horasContratadas = 0
+        } else {
+          const pacoteQ = await db.query(
+            `SELECT horas_incluidas FROM pacotes WHERE id = $1 AND tenant_id = $2`,
+            [pacote_id, tenant_id]
+          )
+          if (!pacoteQ.rows[0]) return reply.code(400).send({ error: 'Pacote não encontrado' })
+          horasContratadas = Number(pacoteQ.rows[0].horas_incluidas)
+        }
+      }
+
+      const sets = []
+      const vals = []
+      let idx = 1
+
+      if (pacote_id !== undefined) { sets.push(`pacote_id = $${idx++}`); vals.push(pacote_id) }
+      if (horasContratadas !== null) { sets.push(`horas_contratadas = $${idx++}`); vals.push(horasContratadas) }
+      if (valor_fixo !== undefined) { sets.push(`valor_fixo = $${idx++}`); vals.push(valor_fixo) }
+      if (comissao_pct !== undefined) { sets.push(`comissao_pct = $${idx++}`); vals.push(comissao_pct) }
+
+      if (sets.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+
+      vals.push(request.params.id)
+      const result = await db.query(
+        `UPDATE contratos SET ${sets.join(', ')}
+         WHERE id = $${idx} AND status = 'rascunho'
+         RETURNING id, status, pacote_id, valor_fixo, comissao_pct,
+                   horas_contratadas, horas_consumidas,
+                   (horas_contratadas - horas_consumidas) AS horas_restantes`,
+        vals
+      )
+      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não está em rascunho' })
+      return result.rows[0]
+    } finally { db.release() }
+  })
+
   // POST /v1/contratos/:id/assinar → em_analise
-  app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -84,7 +178,7 @@ export async function contratosRoutes(app) {
   })
 
   // POST /v1/contratos/:id/assinar-digital
-  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/assinar-digital', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { signatureImageBase64, acceptedTerms } = request.body ?? {}
 
@@ -102,7 +196,7 @@ export async function contratosRoutes(app) {
     try {
       const q = await db.query(
         `SELECT c.id, c.status, c.cliente_id,
-                cl.fat_anual, cl.cnpj, cl.score as cliente_score
+                cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
          FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id
          WHERE c.id = $1 AND c.status = 'rascunho'`,
         [request.params.id]
@@ -112,13 +206,7 @@ export async function contratosRoutes(app) {
         return reply.code(400).send({ error: 'Contrato não encontrado ou não está em rascunho' })
       }
 
-      // Score interno (Auditoria Comercial)
-      let score = 0
-      if (Number(contrato.fat_anual) > 50000) score += 50
-      if (contrato.cnpj) score += 20
-      if ((contrato.cliente_score ?? 0) >= 70) score += 30
-
-      const aprovado = score >= 60
+      const { score, risco, aprovado } = _calcularScoreCredito(contrato)
       const novoStatus = aprovado ? 'ativo' : 'em_analise'
       const signatureUrl = `data:image/png;base64,${signatureImageBase64}`
       const clientIp = request.headers['x-forwarded-for']?.split(',')[0]?.trim()
@@ -152,20 +240,20 @@ export async function contratosRoutes(app) {
         throw txErr
       }
 
-      return { aprovado, score, status: novoStatus, requer_backoffice: !aprovado }
+      return { aprovado, score, risco, status: novoStatus, requer_backoffice: !aprovado }
     } finally {
       db.release()
     }
   })
 
   // POST /v1/contratos/:id/analisar → score automático → ativo ou cancelado
-  app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.post('/v1/contratos/:id/analisar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
       // Busca contrato + cliente
       const q = await db.query(
-        `SELECT c.*, cl.fat_anual, cl.cnpj, cl.score as cliente_score
+        `SELECT c.*, cl.fat_anual, cl.cnpj, cl.score as cliente_score, cl.nicho
          FROM contratos c JOIN clientes cl ON cl.id = c.cliente_id
          WHERE c.id = $1 AND c.status = 'em_analise'`,
         [request.params.id]
@@ -173,13 +261,7 @@ export async function contratosRoutes(app) {
       const contrato = q.rows[0]
       if (!contrato) return reply.code(400).send({ error: 'Contrato não em análise' })
 
-      // Score: fat_anual > 50000 = +50, cnpj presente = +20, score do cliente >= 70 = +30
-      let score = 0
-      if (Number(contrato.fat_anual) > 50000) score += 50
-      if (contrato.cnpj) score += 20
-      if ((contrato.cliente_score ?? 0) >= 70) score += 30
-
-      const aprovado = score >= 60
+      const { score, risco, aprovado } = _calcularScoreCredito(contrato)
       const novoStatus = aprovado ? 'ativo' : 'cancelado'
 
       await db.query(
@@ -190,7 +272,7 @@ export async function contratosRoutes(app) {
          request.params.id]
       )
 
-      return { aprovado, score, status: novoStatus }
+      return { aprovado, score, risco, status: novoStatus }
     } finally {
       db.release()
     }
@@ -198,7 +280,7 @@ export async function contratosRoutes(app) {
 
   // PATCH /v1/contratos/:id/assumir-risco → ativo forçado
   app.patch('/v1/contratos/:id/assumir-risco', {
-    preHandler: app.requirePapel(['franqueador_master', 'franqueado']),
+    preHandler: app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
   }, async (request, reply) => {
     const { confirmacao, senha } = request.body ?? {}
     if (!confirmacao || confirmacao.toUpperCase() !== 'CONCORDO') {
@@ -255,17 +337,39 @@ export async function contratosRoutes(app) {
     }
   })
 
+  // PATCH /v1/contratos/:id/tiktok-username — define o @username do apresentador TikTok
+  app.patch('/v1/contratos/:id/tiktok-username', {
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+  }, async (request, reply) => {
+    const { tiktok_username } = request.body ?? {}
+    const username = typeof tiktok_username === 'string'
+      ? tiktok_username.replace(/^@/, '').trim() || null
+      : null
+
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const { rows } = await db.query(
+        `UPDATE contratos SET tiktok_username = $1 WHERE id = $2 AND tenant_id = $3
+         RETURNING id, tiktok_username`,
+        [username, request.params.id, tenant_id]
+      )
+      if (!rows.length) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      return reply.send(rows[0])
+    } finally { db.release() }
+  })
+
   // PATCH /v1/contratos/:id/cancelar
-  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.patch('/v1/contratos/:id/cancelar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(
         `UPDATE contratos SET status = 'cancelado', cancelado_em = NOW()
-         WHERE id = $1 AND status != 'cancelado' RETURNING id, status`,
+         WHERE id = $1 AND status IN ('em_analise', 'ativo') RETURNING id, status`,
         [request.params.id]
       )
-      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou já cancelado' })
+      if (!result.rows[0]) return reply.code(400).send({ error: 'Contrato não encontrado ou não pode ser cancelado neste estado' })
       return result.rows[0]
     } finally {
       db.release()
@@ -273,7 +377,7 @@ export async function contratosRoutes(app) {
   })
 
   // GET /v1/analise-credito
-  app.get('/v1/analise-credito', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
+  app.get('/v1/analise-credito', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -435,4 +539,52 @@ export async function contratosRoutes(app) {
       db.release()
     }
   })
+}
+
+/**
+ * Calcula o score de crédito e classifica o risco.
+ * Escala 0-100:
+ *   - fat_anual (até 40 pts): porte da operação
+ *   - cnpj (até 20 pts): PJ formalizada tem menos risco que PF
+ *   - cliente_score (até 30 pts): score externo (Serasa/interno)
+ *   - nicho (até 10 pts): nichos recorrentes/estáveis
+ *
+ * Classificação:
+ *   - score >= 75 → baixo risco (aprova auto)
+ *   - score >= 45 → médio risco (requer análise)
+ *   - score <  45 → alto risco (recomenda recusa)
+ *
+ * Aprovação automática: score >= 60
+ */
+function _calcularScoreCredito({ fat_anual, cnpj, cliente_score, nicho } = {}) {
+  let score = 0
+  const fat = Number(fat_anual) || 0
+
+  // Porte de faturamento — max 40
+  if (fat >= 200_000) score += 40
+  else if (fat >= 50_000) score += 25
+  else if (fat >= 10_000) score += 15
+  else if (fat >= 1_000) score += 5
+
+  // CNPJ formalizado — max 20
+  if (cnpj && String(cnpj).replace(/\D/g, '').length >= 14) score += 20
+
+  // Score externo (Serasa/interno normalizado 0-1000) — max 30
+  const cs = Number(cliente_score) || 0
+  if (cs >= 800) score += 30
+  else if (cs >= 600) score += 20
+  else if (cs >= 400) score += 10
+
+  // Nicho recorrente — max 10
+  const nichosEstaveis = ['beleza', 'moda', 'alimentacao', 'alimentação', 'saude', 'saúde', 'pet', 'fitness']
+  if (nicho && nichosEstaveis.includes(String(nicho).toLowerCase().trim())) score += 10
+
+  score = Math.min(100, score)
+
+  let risco
+  if (score >= 75) risco = 'baixo'
+  else if (score >= 45) risco = 'medio'
+  else risco = 'alto'
+
+  return { score, risco, aprovado: score >= 60 }
 }

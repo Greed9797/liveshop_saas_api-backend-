@@ -8,7 +8,7 @@ const BASE_URL = process.env.ASAAS_SANDBOX === 'true'
  * Realiza uma chamada à API Asaas.
  * Lança erro com mensagem legível se status >= 400.
  */
-async function _request(method, path, body = null) {
+async function _request(method, path, body = null, idempotencyKey = null) {
   const apiKey = process.env.ASAAS_API_KEY;
   if (!apiKey) throw new Error('ASAAS_API_KEY não configurada');
 
@@ -19,6 +19,7 @@ async function _request(method, path, body = null) {
       'Content-Type': 'application/json',
     },
   };
+  if (idempotencyKey) options.headers['Idempotency-Key'] = idempotencyKey;
   if (body) options.body = JSON.stringify(body);
 
   let res;
@@ -94,6 +95,7 @@ export async function criarCobranca({
   descricao,
   externalReference, // nosso boleto.id
   billingType = 'BOLETO',
+  idempotencyKey = null,
 }) {
   const BILLING_TYPES = new Set(['BOLETO', 'PIX', 'CREDIT_CARD', 'UNDEFINED']);
   if (!BILLING_TYPES.has(billingType)) {
@@ -109,7 +111,7 @@ export async function criarCobranca({
     externalReference,
     fine: { value: 2 },       // 2% de multa após vencimento
     interest: { value: 1 },   // 1% ao mês de juros
-  });
+  }, idempotencyKey);
 }
 
 /**

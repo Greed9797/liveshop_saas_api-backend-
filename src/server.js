@@ -34,6 +34,15 @@ cron.schedule('*/60 * * * * *', async () => {
   }
 })
 
+// Daily at 02:00: refresh TikTok OAuth tokens expiring within 7 days
+cron.schedule('0 2 * * *', async () => {
+  try {
+    await TikTokService.refreshAllExpiringTokens(app.db)
+  } catch (error) {
+    app.log.error({ error }, 'Falha no refresh de tokens TikTok')
+  }
+})
+
 // Daily cleanup of rejected contracts without franqueado decision for 5 days
 cron.schedule('0 3 * * *', async () => {
   try {

@@ -1,5 +1,5 @@
 export async function leadsRoutes(app) {
-  const leadsAccess = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])]
+  const leadsAccess = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])]
 
   // GET /v1/leads
   app.get('/v1/leads', { preHandler: leadsAccess }, async (request) => {

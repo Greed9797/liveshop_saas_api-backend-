@@ -10,7 +10,7 @@ const _emitter = new EventEmitter()
 _emitter.setMaxListeners(0) // Unlimited — SSE clients each add one listener per live, removed on disconnect
 
 const MAX_CONNECTORS = Number(process.env.TIKTOK_MAX_CONNECTORS ?? 20)
-const FLUSH_INTERVAL_MS = 30_000
+const FLUSH_INTERVAL_MS = 10_000  // Real-time: 6 inserts/min por live
 const CIRCUIT_BREAKER_THRESHOLD = Number(process.env.TIKTOK_CB_THRESHOLD ?? 5)
 const CIRCUIT_BREAKER_WINDOW_MS = Number(process.env.TIKTOK_CB_WINDOW_MS ?? 5 * 60_000)
 
@@ -100,6 +100,7 @@ export async function stopConnector(liveId) {
   }
 
   try {
+    entry.connection.removeAllListeners()
     await entry.connection.disconnect()
   } catch (err) {
     _log?.warn({ err, liveId }, 'tiktokManager: erro ao desconectar connector')

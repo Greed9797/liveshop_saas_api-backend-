@@ -149,6 +149,7 @@ async function processTenantBilling(tenantId, day, spDate) {
           descricao: `${tituloFatura} - LiveShop`,
           externalReference: boletoId,
           billingType: 'BOLETO',
+          idempotencyKey,
         })
 
         await db.query(
@@ -173,22 +174,29 @@ async function processTenantBilling(tenantId, day, spDate) {
   }
 }
 
+let _billingRunning = false
+
 export async function startBillingEngine(db) {
   dbPool = db
   console.log('[Billing Engine] Cron configurado para 02:00 AM (SP)')
 
   cron.schedule('0 2 * * *', async () => {
-    console.log('[Billing Engine] Iniciando rotina de faturamento...')
-    const spDate = getSPDate()
-    const day = spDate.getDate()
-
-    // O faturamento só roda se for dia 1 ou 16
-    if (day !== 1 && day !== 16) {
-      console.log('[Billing Engine] Hoje não é dia de faturamento. Encerrando.')
+    if (_billingRunning) {
+      console.log('[Billing Engine] Já em execução, pulando.')
       return
     }
-
+    _billingRunning = true
     try {
+      console.log('[Billing Engine] Iniciando rotina de faturamento...')
+      const spDate = getSPDate()
+      const day = spDate.getDate()
+
+      // O faturamento só roda se for dia 1 ou 16
+      if (day !== 1 && day !== 16) {
+        console.log('[Billing Engine] Hoje não é dia de faturamento. Encerrando.')
+        return
+      }
+
       // Pega todos os tenants
       const res = await dbPool.query('SELECT id FROM tenants')
       for (const row of res.rows) {
@@ -197,6 +205,8 @@ export async function startBillingEngine(db) {
       console.log('[Billing Engine] Rotina finalizada com sucesso.')
     } catch (err) {
       console.error('[Billing Engine] Erro geral na rotina:', err)
+    } finally {
+      _billingRunning = false
     }
   }, {
     timezone: "America/Sao_Paulo"

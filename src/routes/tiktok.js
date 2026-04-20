@@ -4,21 +4,35 @@
  */
 
 import crypto from 'node:crypto'
+import * as connectorManager from '../services/tiktok-connector-manager.js'
 import { getEmitter } from '../services/tiktok-connector-manager.js'
 import { createSignedState, verifySignedState } from '../services/oauth-state.js'
 
 export async function tiktokRoutes(app) {
-  // Configuração do App do TikTok (seria definido no .env na versão de produção)
-  const TIKTOK_CLIENT_KEY = process.env.TIKTOK_CLIENT_KEY || 'SUA_CLIENT_KEY_AQUI';
-  const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET || 'SEU_CLIENT_SECRET_AQUI';
-  // Endpoint de retorno após login do TikTok no painel de gestão do franqueado
-  const TIKTOK_REDIRECT_URI = process.env.TIKTOK_REDIRECT_URI || 'https://api.liveshop.com.br/v1/tiktok/callback';
+  const TIKTOK_CLIENT_KEY    = process.env.TIKTOK_CLIENT_KEY;
+  const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
+  const TIKTOK_REDIRECT_URI  = process.env.TIKTOK_REDIRECT_URI;
+  const hasOauthConfig = Boolean(
+    TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET && TIKTOK_REDIRECT_URI
+  )
+
+  if (!hasOauthConfig) {
+    app.log.warn(
+      '[TikTok OAuth] Credenciais ausentes; rotas de OAuth ficarão indisponíveis até configurar TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET e TIKTOK_REDIRECT_URI'
+    )
+  }
 
   /**
    * GET /v1/tiktok/connect
    * Gera a URL de OAuth do TikTok e retorna para o Frontend (Painel do Franqueado)
    */
-  app.get('/v1/tiktok/connect', { preHandler: [app.authenticate, app.requirePapel(['franqueado'])] }, async (request, reply) => {
+  app.get('/v1/tiktok/connect', { preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])] }, async (request, reply) => {
+    if (!hasOauthConfig) {
+      return reply.code(503).send({
+        error: 'Integração TikTok OAuth não configurada no servidor',
+      })
+    }
+
     // CSRF signed state (HMAC + TTL 10 min) — previne replay e tampering.
     // Substitui o padrão antigo que usava tenant_id raw (vulnerável a CSRF).
     const nonce = crypto.randomBytes(8).toString('hex');
@@ -37,6 +51,12 @@ export async function tiktokRoutes(app) {
    * Recebe o 'code' do TikTok após o login do usuário e troca por Access Token
    */
   app.get('/v1/tiktok/callback', async (request, reply) => {
+    if (!hasOauthConfig) {
+      return reply.code(503).send({
+        error: 'Integração TikTok OAuth não configurada no servidor',
+      })
+    }
+
     const { code, state, error, error_description } = request.query;
 
     if (error) {
@@ -61,76 +81,47 @@ export async function tiktokRoutes(app) {
       // Verificar que o tenant existe antes de atualizar credenciais
       const tenantCheck = await app.db.query(`SELECT id FROM tenants WHERE id = $1`, [tenantId])
       if (tenantCheck.rowCount === 0) {
-        return reply.code(404).send({ error: 'Tenant não encontrado' })
+        return reply.type('text/html').send(_errorPage('Conta não encontrada. Tente conectar novamente.'))
       }
-      // Endpoint real para troca de código por token
-      // POST https://open.tiktokapis.com/v2/oauth/token/
-      // Na versão em produção isso seria um fetch (ou axios):
-      
-      /*
-      const tokenResponse = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
+
+      // Troca code → tokens via TikTok Open API v2
+      const tokenRes = await fetch('https://open.tiktokapis.com/v2/oauth/token/', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
           client_key: TIKTOK_CLIENT_KEY,
           client_secret: TIKTOK_CLIENT_SECRET,
-          code: code,
+          code,
           grant_type: 'authorization_code',
-          redirect_uri: TIKTOK_REDIRECT_URI
-        })
-      });
-      const data = await tokenResponse.json();
-      */
+          redirect_uri: TIKTOK_REDIRECT_URI,
+        }).toString(),
+      })
+      const data = await tokenRes.json()
 
-      // Simulando o retorno de sucesso do TikTok
-      const data = {
-        access_token: `tk_live_${Math.random().toString(36).substring(7)}_${Date.now()}`,
-        refresh_token: `tk_refresh_${Math.random().toString(36).substring(7)}`,
-        expires_in: 86400, // 24 horas (em segundos)
-        open_id: `user_${Math.random().toString(36).substring(7)}`
-      };
+      if (data.error) {
+        app.log.warn({ data }, '[TikTok OAuth] Erro na troca de código')
+        return reply.type('text/html').send(_errorPage(`TikTok: ${data.error_description ?? data.error}`))
+      }
 
-      // Calcula a data de expiração real (agora + expires_in)
-      const expiresAt = new Date();
-      expiresAt.setSeconds(expiresAt.getSeconds() + data.expires_in);
+      const expiresAt = new Date(Date.now() + data.expires_in * 1000)
 
-      // Usamos uma query limpa do pool (db.query) ao invés do dbTenant porque
-      // a requisição vem do próprio TikTok, sem o Header de Authorization do nosso JWT
       await app.db.query(`
-        UPDATE tenants
-        SET 
-          tiktok_access_token = $1,
-          tiktok_refresh_token = $2,
+        UPDATE tenants SET
+          tiktok_access_token     = $1,
+          tiktok_refresh_token    = $2,
           tiktok_token_expires_at = $3,
-          tiktok_user_id = $4
+          tiktok_user_id          = $4
         WHERE id = $5
-      `, [
-        data.access_token,
-        data.refresh_token,
-        expiresAt,
-        data.open_id,
-        tenantId
-      ]);
+      `, [data.access_token, data.refresh_token, expiresAt, data.open_id, tenantId])
 
-      app.log.info(`[TikTok OAuth] Token salvo com sucesso para o tenant ${tenantId}`);
+      app.log.info(`[TikTok OAuth] Token salvo para tenant ${tenantId} (open_id: ${data.open_id})`)
 
-      // Redireciona o usuário de volta para o App Flutter ou exibe tela de sucesso
-      // Em produção, isso redirecionaria para um Deep Link do app (ex: liveshop://tiktok/success)
-      return reply.type('text/html').send(`
-        <html>
-          <body>
-            <h2>TikTok Conectado com Sucesso!</h2>
-            <p>Você já pode fechar esta janela e voltar para o aplicativo LiveShop.</p>
-            <script>
-              setTimeout(() => { window.close(); }, 3000);
-            </script>
-          </body>
-        </html>
-      `);
+      const frontendUrl = process.env.FRONTEND_URL ?? 'http://localhost:4200'
+      return reply.type('text/html').send(_successPage(frontendUrl))
 
     } catch (err) {
-      app.log.error(`[TikTok OAuth] Falha ao processar callback: ${err.message}`);
-      return reply.code(500).send({ error: 'Falha ao processar a autenticação com o TikTok' });
+      app.log.error({ err }, '[TikTok OAuth] Falha ao processar callback')
+      return reply.type('text/html').send(_errorPage('Falha de comunicação com o TikTok. Tente novamente.'))
     }
   });
 
@@ -138,44 +129,66 @@ export async function tiktokRoutes(app) {
    * GET /v1/tiktok/status
    * Verifica se o tenant atual já possui o TikTok conectado e token válido
    */
-  app.get('/v1/tiktok/status', { preHandler: [app.authenticate, app.requirePapel(['franqueado'])] }, async (request, reply) => {
-    // Como a rota é autenticada com franqueado, o JWT já tem o tenant_id
-    const tenantId = request.user.tenant_id;
-    const dbTenant = await app.dbTenant(tenantId);
+  app.get('/v1/tiktok/status', { preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])] }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const { rows } = await app.db.query(
+      `SELECT tiktok_access_token, tiktok_user_id, tiktok_token_expires_at FROM tenants WHERE id = $1`,
+      [tenant_id]
+    )
+    const t = rows[0]
+    if (!t) return reply.code(404).send({ error: 'Tenant não encontrado' })
 
-    try {
-      const result = await dbTenant.query(`
-        SELECT 
-          tiktok_access_token IS NOT NULL AS conectado,
-          tiktok_token_expires_at
-        FROM tenants
-        WHERE id = $1
-      `, [tenantId]);
+    const hasToken = !!t.tiktok_access_token
+    const notExpired = t.tiktok_token_expires_at ? new Date(t.tiktok_token_expires_at) > new Date() : false
+    const connected = hasToken && notExpired
 
-      if (result.rowCount === 0) {
-        return reply.code(404).send({ error: 'Tenant não encontrado' });
-      }
+    return reply.send({
+      connected,
+      tiktok_user_id: t.tiktok_user_id ?? null,
+      token_expires_at: t.tiktok_token_expires_at ?? null,
+    })
+  })
 
-      const info = result.rows[0];
-      const isExpirado = info.tiktok_token_expires_at ? new Date() > new Date(info.tiktok_token_expires_at) : true;
-
-      return reply.send({
-        conectado: info.conectado,
-        status: info.conectado && !isExpirado ? 'ativo' : (info.conectado && isExpirado ? 'expirado' : 'nao_conectado'),
-        expira_em: info.tiktok_token_expires_at
-      });
-
-    } finally {
-      dbTenant.release();
+  // ── POST /v1/tiktok/test-connector — inicia conector para qualquer @username (dev only) ──
+  app.post('/v1/tiktok/test-connector', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+  }, async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.code(403).send({ error: 'Endpoint disponível apenas em desenvolvimento' })
     }
-  });
+    const { username, fake_live_id } = request.body ?? {}
+    if (!username || typeof username !== 'string') {
+      return reply.code(400).send({ error: 'username é obrigatório' })
+    }
+    const clean = username.replace(/^@/, '').trim()
+    const liveId = fake_live_id ?? `test-${clean}-${Date.now()}`
+
+    if (connectorManager.has(liveId)) {
+      return reply.send({ ok: true, message: 'Connector já ativo', live_id: liveId })
+    }
+    await connectorManager.startConnector(liveId, request.user.tenant_id, clean, app.db)
+    return reply.send({ ok: true, live_id: liveId, username: clean, sse: `/v1/lives/${liveId}/stream` })
+  })
+
+  // ── DELETE /v1/tiktok/test-connector/:liveId — para conector de teste ─────
+  app.delete('/v1/tiktok/test-connector/:liveId', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+  }, async (request, reply) => {
+    if (process.env.NODE_ENV === 'production') {
+      return reply.code(403).send({ error: 'Endpoint disponível apenas em desenvolvimento' })
+    }
+    if (connectorManager.has(request.params.liveId)) {
+      await connectorManager.stopConnector(request.params.liveId)
+    }
+    return reply.send({ ok: true })
+  })
 
   // ── GET /v1/lives/:liveId/events — SSE por-evento (chat/gift/share) ───────
   // Canal separado do /stream (snapshots agregados 30s). Emite eventos
   // individuais no momento em que acontecem na live — consumidor renderiza
   // chat ao vivo, gifts chegando, shares etc.
   app.get('/v1/lives/:liveId/events', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])]
   }, async (request, reply) => {
     const { tenant_id } = request.user
     const { liveId } = request.params
@@ -201,8 +214,11 @@ export async function tiktokRoutes(app) {
     const emitter = getEmitter()
     const eventName = `event:${liveId}`
     const handler = (evt) => {
-      if (!reply.raw.destroyed) {
+      if (reply.raw.destroyed) return
+      try {
         reply.raw.write(`event: ${evt.type}\ndata: ${JSON.stringify(evt)}\n\n`)
+      } catch {
+        emitter.off(eventName, handler)
       }
     }
     emitter.on(eventName, handler)
@@ -222,7 +238,7 @@ export async function tiktokRoutes(app) {
   })
 
   // ── GET /v1/lives/:liveId/stream — SSE real-time ──────────────────────────
-  app.get('/v1/lives/:liveId/stream', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.get('/v1/lives/:liveId/stream', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const { liveId } = request.params
 
@@ -266,8 +282,11 @@ export async function tiktokRoutes(app) {
     const emitter = getEmitter()
     const eventName = `snapshot:${liveId}`
     const handler = (snapshot) => {
-      if (!reply.raw.destroyed) {
+      if (reply.raw.destroyed) return
+      try {
         reply.raw.write(`data: ${JSON.stringify(snapshot)}\n\n`)
+      } catch {
+        emitter.off(eventName, handler)
       }
     }
     emitter.on(eventName, handler)
@@ -288,4 +307,41 @@ export async function tiktokRoutes(app) {
     clearInterval(heartbeat)
     try { reply.raw.end() } catch {}
   })
+}
+
+// ── HTML helpers para o OAuth callback ───────────────────────────────────────
+
+function _successPage(frontendUrl) {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><title>TikTok Conectado</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#f9f9f9}</style>
+</head>
+<body>
+  <div style="text-align:center">
+    <h2 style="color:#010101">✓ TikTok conectado com sucesso!</h2>
+    <p style="color:#666">Esta aba será fechada automaticamente...</p>
+  </div>
+  <script>
+    setTimeout(() => {
+      window.close();
+      if (window.opener) { window.opener.postMessage('tiktok_connected', '${frontendUrl}'); }
+    }, 1500);
+  </script>
+</body></html>`
+}
+
+function _errorPage(message) {
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head><meta charset="UTF-8"><title>Erro TikTok</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#fff5f5}</style>
+</head>
+<body>
+  <div style="text-align:center">
+    <h2 style="color:#c0392b">Erro ao conectar TikTok</h2>
+    <p style="color:#666">${message}</p>
+    <button onclick="window.close()" style="padding:8px 16px;cursor:pointer">Fechar</button>
+  </div>
+</body></html>`
 }

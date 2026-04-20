@@ -43,6 +43,12 @@ async function main() {
     '025_create_live_requests.sql',
     '026_add_analytics_dashboard_indexes.sql',
     '029_lives_tiktok_fields.sql',
+    '030_create_pacotes.sql',
+    '031_pacotes_contratos_horas.sql',
+    '032_cabines_config.sql',
+    '033_add_roles_apresentador_gerente.sql',
+    '034_contratos_pacote.sql',
+    '035_manuais_metadata.sql',
   ]
 
   for (const migration of pendingMigrations) {

@@ -1,7 +1,7 @@
 export async function homeRoutes(app) {
   // GET /v1/home/dashboard
   app.get('/v1/home/dashboard', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master']),
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
@@ -150,7 +150,7 @@ export async function homeRoutes(app) {
         ranking_dia: rankingDia
       }
     } catch (error) {
-      console.error('ERRO NA ROTA /v1/home/dashboard:', error)
+      app.log.error({ err: error }, 'ERRO NA ROTA /v1/home/dashboard')
       throw error
     } finally {
       db.release()

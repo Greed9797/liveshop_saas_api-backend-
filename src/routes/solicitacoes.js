@@ -2,7 +2,7 @@ export async function solicitacoesRoutes(app) {
   // GET /v1/solicitacoes — lista solicitações (franqueador/franqueador_master)
   // Query param: ?status=pendente (default) | aprovada | recusada | all
   app.get('/v1/solicitacoes', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master']),
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request) => {
     const { tenant_id } = request.user
     const statusFilter = request.query.status ?? 'pendente'
@@ -62,7 +62,7 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/aprovar — aprovar solicitação com check de overlap
   app.patch('/v1/solicitacoes/:id/aprovar', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master']),
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params
@@ -121,7 +121,7 @@ export async function solicitacoesRoutes(app) {
       return updated.rows[0]
     } catch (e) {
       await client.query('ROLLBACK')
-      console.error(e)
+      app.log.error({ err: e }, 'unhandled error')
       throw e
     } finally {
       client.release()
@@ -130,7 +130,7 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/recusar — recusar solicitação
   app.patch('/v1/solicitacoes/:id/recusar', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master']),
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params

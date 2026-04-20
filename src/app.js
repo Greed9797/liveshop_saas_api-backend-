@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 import cors from '@fastify/cors'
 import rateLimit from '@fastify/rate-limit'
 import helmet from '@fastify/helmet'
+import multipart from '@fastify/multipart'
 import { dbPlugin } from './plugins/db.js'
 import { authPlugin } from './plugins/auth.js'
 import { authRoutes } from './routes/auth.js'
@@ -22,6 +23,8 @@ import { tiktokRoutes } from './routes/tiktok.js'
 import { cepRoutes } from './routes/cep.js'
 import { configuracoesRoutes } from './routes/configuracoes.js'
 import { solicitacoesRoutes } from './routes/solicitacoes.js'
+import { pacotesRoutes } from './routes/pacotes.js'
+import { usuariosRoutes } from './routes/usuarios.js'
 
 export async function buildApp(opts = {}) {
   const app = Fastify({
@@ -42,6 +45,7 @@ export async function buildApp(opts = {}) {
     timeWindow: '1 minute',
     errorResponseBuilder: () => ({ error: 'Muitas requisições. Tente novamente em breve.' }),
   })
+  await app.register(multipart, { limits: { fileSize: 5 * 1024 * 1024 } })
   await app.register(dbPlugin)
   await app.register(authPlugin)
 
@@ -63,8 +67,19 @@ export async function buildApp(opts = {}) {
   await app.register(cepRoutes)
   await app.register(configuracoesRoutes)
   await app.register(solicitacoesRoutes)
+  await app.register(pacotesRoutes)
+  await app.register(usuariosRoutes)
 
   app.get('/health', () => ({ ok: true }))
+
+  app.setErrorHandler((error, request, reply) => {
+    const status = error.statusCode ?? 500
+    if (status >= 500) {
+      request.log.error({ err: error }, 'Unhandled error')
+      return reply.code(500).send({ error: 'Erro interno do servidor' })
+    }
+    return reply.code(status).send({ error: error.message })
+  })
 
   return app
 }

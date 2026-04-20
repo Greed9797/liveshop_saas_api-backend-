@@ -334,7 +334,7 @@ export async function clienteDashboardRoutes(app) {
       }
 
     } catch (e) {
-      console.error(e)
+      app.log.error({ err: e }, 'unhandled error')
       throw e
     } finally {
       db.release()

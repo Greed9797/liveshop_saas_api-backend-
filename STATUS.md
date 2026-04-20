@@ -1,5 +1,31 @@
 # STATUS
 
+## Atualizacao Desta Sessao
+- O backend foi ajustado para nao cair no startup quando as credenciais TikTok OAuth nao estiverem configuradas.
+- A rota TikTok agora degrada com seguranca em ambiente local em vez de derrubar o servidor inteiro.
+- O `STATUS.md` agora e o guia principal para retomar essa correcao em outra sessao.
+
+### Pastas mexidas nesta sessao
+- `src/routes/`
+
+### Arquivos alterados nesta sessao
+- `src/routes/tiktok.js`
+
+### O que foi mudado em `src/routes/tiktok.js`
+- Removido o `throw` no startup quando faltam:
+  - `TIKTOK_CLIENT_KEY`
+  - `TIKTOK_CLIENT_SECRET`
+  - `TIKTOK_REDIRECT_URI`
+- Adicionado `hasOauthConfig` para controlar disponibilidade das rotas OAuth.
+- `GET /v1/tiktok/connect` agora retorna `503` quando TikTok OAuth nao estiver configurado.
+- `GET /v1/tiktok/callback` agora retorna `503` quando TikTok OAuth nao estiver configurado.
+- `GET /v1/tiktok/status` agora retorna estado seguro `nao_configurado` quando o OAuth nao estiver configurado.
+
+### Validacao desta sessao
+- O servidor deixa de quebrar no startup por conta do TikTok OAuth nao configurado.
+- `npm test` foi executado.
+- Os testes unitarios seguem passando, mas a suite `e2e/tests/*.spec.js` falha por problema pre-existente de configuracao Playwright/Vitest, nao relacionado a esta correcao.
+
 ## Resumo
 - Backend Fastify funcional localmente.
 - `npm test` passa com `18/18` testes.
@@ -109,8 +135,13 @@ Mensagem sugerida:
 
 ## Validacao Atual
 - `npm test` passa.
+- Nesta sessao, `npm test` confirmou que a falha atual esta concentrada na suite `e2e` com erro de runner Playwright, e nao na correcao do TikTok.
 - Recomendado apos commits:
   - `npm test`
   - smoke test de login
   - smoke test de `/v1/analytics/franqueado/resumo`
   - smoke test de `/v1/cliente/dashboard`
+
+## Notas de Continuidade
+- Para continuar o backend, leia primeiro este arquivo.
+- O arquivo `PROMPT_CONTINUACAO.md` deste repositorio aponta para este `STATUS.md` como guia completo.

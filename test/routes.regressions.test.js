@@ -12,12 +12,10 @@ import { leadsRoutes } from '../src/routes/leads.js'
 
 const ENV_KEYS = [
   'JWT_SECRET',
-  'USE_DEV_BYPASS',
   'NODE_ENV',
-  'DEV_BYPASS_ROLE',
-  'DEV_BYPASS_USER_ID',
-  'DEV_BYPASS_TENANT_ID',
-  'DEV_BYPASS_NAME',
+  'TIKTOK_CLIENT_KEY',
+  'TIKTOK_CLIENT_SECRET',
+  'TIKTOK_REDIRECT_URI',
 ]
 
 let envSnapshot = {}
@@ -110,7 +108,7 @@ describe('Route regressions: SQL and RBAC', () => {
 
   it('RBAC blocks cliente dashboard role when bypass is disabled', async () => {
     process.env.NODE_ENV = 'test'
-    process.env.JWT_SECRET = 'test-secret'
+    process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
     delete process.env.USE_DEV_BYPASS
 
     const app = Fastify()
@@ -139,32 +137,6 @@ describe('Route regressions: SQL and RBAC', () => {
     })
 
     expect(response.statusCode).toBe(403)
-
-    await app.close()
-  })
-
-  it('RBAC bypass works only with explicit USE_DEV_BYPASS=true outside production', async () => {
-    process.env.NODE_ENV = 'development'
-    process.env.JWT_SECRET = 'test-secret'
-    process.env.USE_DEV_BYPASS = 'true'
-    process.env.DEV_BYPASS_ROLE = 'cliente_parceiro'
-
-    const app = Fastify()
-    const fakeDbPlugin = fp(async (instance) => {
-      instance.decorate('db', { query: vi.fn() })
-    }, { name: 'db' })
-
-    await app.register(fakeDbPlugin)
-    await app.register(authPlugin)
-
-    app.get('/rbac-check', {
-      preHandler: app.requirePapel(['cliente_parceiro']),
-    }, async (request) => ({ ok: true, papel: request.user.papel }))
-
-    const response = await app.inject({ method: 'GET', url: '/rbac-check' })
-
-    expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({ ok: true, papel: 'cliente_parceiro' })
 
     await app.close()
   })
@@ -598,10 +570,11 @@ describe('Route regressions: SQL and RBAC', () => {
     const cabineId = 'cabine-uuid-456'
 
     const queryMock = vi.fn()
-      .mockResolvedValueOnce({ rows: [{ live_atual_id: liveId, status: 'ao_vivo' }] })
-      .mockResolvedValueOnce({ rows: [{ iniciado_em: new Date().toISOString(), fat_gerado: 0, apresentador_nome: 'Closer', cliente_nome: 'Parceiro' }] })
-      .mockResolvedValueOnce({ rows: [{ viewer_count: 10, total_orders: 2, gmv: 500, likes_count: 50, comments_count: 30 }] })
-      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ live_atual_id: liveId, status: 'ao_vivo' }] })  // cabine query
+      .mockResolvedValueOnce({ rows: [{ id: liveId }] })  // lives em_andamento search
+      .mockResolvedValueOnce({ rows: [{ iniciado_em: new Date().toISOString(), fat_gerado: 0, contrato_id: null, apresentador_nome: 'Closer', cliente_nome: 'Parceiro', tiktok_username: null }] })  // live full data
+      .mockResolvedValueOnce({ rows: [{ viewer_count: 10, total_viewers: 0, total_orders: 2, gmv: 500, likes_count: 50, comments_count: 30, gifts_diamonds: 0, shares_count: 0 }] })  // snapshot
+      .mockResolvedValueOnce({ rows: [] })  // top produto
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {
@@ -631,6 +604,9 @@ describe('Route regressions: SQL and RBAC', () => {
   describe('TikTok OAuth CSRF (signed state)', () => {
     async function buildTiktokApp() {
       process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
+      process.env.TIKTOK_CLIENT_KEY = 'test-client-key'
+      process.env.TIKTOK_CLIENT_SECRET = 'test-client-secret'
+      process.env.TIKTOK_REDIRECT_URI = 'https://api.test.com/v1/tiktok/callback'
       const app = Fastify()
       const queryMock = vi.fn().mockResolvedValue({ rowCount: 1, rows: [{ id: 'tenant-1' }] })
       const releaseMock = vi.fn()
@@ -672,6 +648,9 @@ describe('Route regressions: SQL and RBAC', () => {
 
     it('GET /v1/lives/:liveId/events retorna 404 se live não existe ou não está em_andamento', async () => {
       process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
+      process.env.TIKTOK_CLIENT_KEY = 'test-client-key'
+      process.env.TIKTOK_CLIENT_SECRET = 'test-client-secret'
+      process.env.TIKTOK_REDIRECT_URI = 'https://api.test.com/v1/tiktok/callback'
       const app = Fastify()
       const queryMock = vi.fn().mockResolvedValue({ rows: [] }) // live inexistente
       app.decorate('authenticate', async (request) => {
@@ -693,6 +672,60 @@ describe('Route regressions: SQL and RBAC', () => {
       expect(res.statusCode).toBe(404)
       expect(res.json().error).toMatch(/não encontrada|não está ao vivo/i)
       await app.close()
+    })
+
+    it('RBAC: gerente tem acesso às rotas operacionais; apresentador só acessa cabines', async () => {
+      const { cabinesRoutes } = await import('../src/routes/cabines.js')
+      const { financeiroRoutes } = await import('../src/routes/financeiro.js')
+
+      // gerente deve acessar financeiro (mesmo acesso que franqueado)
+      const appGerente = Fastify()
+      const queryMock = vi.fn().mockResolvedValue({ rows: [{ fat_bruto_fixo: '0', fat_bruto_comissao: '0', total_custos: '0' }] })
+      const releaseMock = vi.fn()
+      appGerente.decorate('authenticate', async (req) => {
+        req.user = { tenant_id: 'tenant-1', papel: 'gerente' }
+      })
+      appGerente.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!request.user) request.user = { tenant_id: 'tenant-1', papel: 'gerente' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      appGerente.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+      await appGerente.register(financeiroRoutes)
+      const resGerente = await appGerente.inject({ method: 'GET', url: '/v1/financeiro/resumo?mes=4&ano=2026' })
+      expect(resGerente.statusCode).toBe(200)
+      await appGerente.close()
+
+      // apresentador deve acessar cabines
+      const appApresentador = Fastify()
+      const cabQueryMock = vi.fn().mockResolvedValue({ rows: [] })
+      const cabReleaseMock = vi.fn()
+      appApresentador.decorate('authenticate', async (req) => {
+        req.user = { tenant_id: 'tenant-1', papel: 'apresentador' }
+      })
+      appApresentador.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!request.user) request.user = { tenant_id: 'tenant-1', papel: 'apresentador' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      appApresentador.decorate('dbTenant', async () => ({ query: cabQueryMock, release: cabReleaseMock }))
+      await appApresentador.register(cabinesRoutes)
+      const resApresentador = await appApresentador.inject({ method: 'GET', url: '/v1/cabines' })
+      expect(resApresentador.statusCode).toBe(200)
+      await appApresentador.close()
+
+      // apresentador NÃO deve acessar financeiro
+      const appApresentadorFin = Fastify()
+      appApresentadorFin.decorate('authenticate', async (req) => {
+        req.user = { tenant_id: 'tenant-1', papel: 'apresentador' }
+      })
+      appApresentadorFin.decorate('requirePapel', (papeis) => async (request, reply) => {
+        if (!request.user) request.user = { tenant_id: 'tenant-1', papel: 'apresentador' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      appApresentadorFin.decorate('dbTenant', async () => ({ query: vi.fn(), release: vi.fn() }))
+      await appApresentadorFin.register(financeiroRoutes)
+      const resApresentadorFin = await appApresentadorFin.inject({ method: 'GET', url: '/v1/financeiro/resumo?mes=4&ano=2026' })
+      expect(resApresentadorFin.statusCode).toBe(403)
+      await appApresentadorFin.close()
     })
 
     it('GET /v1/tiktok/callback aceita signed state válido gerado por createSignedState', async () => {

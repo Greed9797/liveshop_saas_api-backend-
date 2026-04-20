@@ -2,34 +2,23 @@ import fp from 'fastify-plugin'
 import jwt from '@fastify/jwt'
 
 async function authPlugin(app) {
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+    throw new Error('JWT_SECRET deve ter no mínimo 32 caracteres')
+  }
+
   await app.register(jwt, {
     secret: process.env.JWT_SECRET,
-    sign: { expiresIn: process.env.JWT_EXPIRES_IN ?? '15m' },
+    sign: {
+      algorithm: 'HS256',
+      expiresIn: process.env.JWT_EXPIRES_IN ?? '15m',
+    },
+    verify: {
+      algorithms: ['HS256'],
+    },
   })
-
-  const isDevBypassEnabled =
-    process.env.USE_DEV_BYPASS === 'true' && process.env.NODE_ENV !== 'production'
-
-  if (isDevBypassEnabled) {
-    app.log.warn('USE_DEV_BYPASS is enabled (non-production only)')
-  }
-
-  function getBypassUser() {
-    return {
-      sub: process.env.DEV_BYPASS_USER_ID ?? '6b2e1a87-fefa-4547-b087-0403193af599',
-      tenant_id: process.env.DEV_BYPASS_TENANT_ID ?? '00000000-0000-0000-0000-000000000001',
-      papel: process.env.DEV_BYPASS_ROLE ?? 'franqueado',
-      nome: process.env.DEV_BYPASS_NAME ?? 'Vitor Miguel',
-    }
-  }
 
   // preHandler reutilizável: app.authenticate
   app.decorate('authenticate', async function (request, reply) {
-    if (isDevBypassEnabled) {
-      request.user = getBypassUser()
-      return
-    }
-
     try {
       await request.jwtVerify()
     } catch (err) {
@@ -41,10 +30,6 @@ async function authPlugin(app) {
   // preHandler: verifica papel específico
   app.decorate('requirePapel', (requiredPapeis) => async (request, reply) => {
     const papeis = Array.isArray(requiredPapeis) ? requiredPapeis : [requiredPapeis]
-
-    if (isDevBypassEnabled) {
-      request.user = getBypassUser()
-    }
 
     if (!request.user) {
       try {

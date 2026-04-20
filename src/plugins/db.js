@@ -5,9 +5,11 @@ import 'dotenv/config'
 const { Pool } = pg
 
 async function dbPlugin(app) {
+  const sslRejectUnauthorized = process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false'
+
   const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: { rejectUnauthorized: false },
+    ssl: { rejectUnauthorized: sslRejectUnauthorized },
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 5000,
@@ -17,6 +19,9 @@ async function dbPlugin(app) {
   const client = await pool.connect()
   client.release()
   app.log.info('PostgreSQL conectado')
+  if (!sslRejectUnauthorized) {
+    app.log.warn('DB SSL certificate verification is DISABLED (DB_SSL_REJECT_UNAUTHORIZED=false)')
+  }
 
   // Decorator para queries simples (sem tenant)
   app.decorate('db', {

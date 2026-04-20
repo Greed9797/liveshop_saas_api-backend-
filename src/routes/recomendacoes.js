@@ -21,7 +21,7 @@ const converterSchema = z.object({
 
 export async function recomendacoesRoutes(app) {
   // GET /v1/recomendacoes
-  app.get('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request) => {
+  app.get('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -36,9 +36,9 @@ export async function recomendacoesRoutes(app) {
   })
 
   // POST /v1/recomendacoes
-  app.post('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.post('/v1/recomendacoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
     const { nome_indicado, recomendante, lat, lng } = parsed.data
@@ -57,9 +57,9 @@ export async function recomendacoesRoutes(app) {
   })
 
   // PATCH /v1/recomendacoes/:id/converter
-  app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.patch('/v1/recomendacoes/:id/converter', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const parsed = converterSchema.safeParse(request.body ?? {})
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id } = request.user
     const { cliente_id, celular, cnpj, cep, cidade, estado, fat_anual, lat, lng } = parsed.data

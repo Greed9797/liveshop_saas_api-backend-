@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import { validarWebhookToken } from '../services/asaas.js'
 
 export async function boletosRoutes(app) {
@@ -96,7 +97,7 @@ export async function boletosRoutes(app) {
   })
 
   // PATCH /v1/boletos/:id/pagar (dev manual)
-  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master']) }, async (request, reply) => {
+  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -117,7 +118,15 @@ export async function boletosRoutes(app) {
     // Validar token secreto enviado no header pelo Pagar.me
     const receivedToken = request.headers['x-webhook-token']
     const expectedToken = process.env.PAGAMENTO_WEBHOOK_TOKEN ?? ''
-    if (!expectedToken || receivedToken !== expectedToken) {
+    if (!expectedToken || expectedToken.length < 16) {
+      return reply.code(500).send({ error: 'Webhook token não configurado' })
+    }
+    if (!receivedToken || receivedToken.length !== expectedToken.length) {
+      return reply.code(401).send({ error: 'Unauthorized' })
+    }
+    const a = Buffer.from(receivedToken)
+    const b = Buffer.from(expectedToken)
+    if (!crypto.timingSafeEqual(a, b)) {
       return reply.code(401).send({ error: 'Unauthorized' })
     }
 

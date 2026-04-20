@@ -1,9 +1,10 @@
+import crypto from 'node:crypto'
 import { z } from 'zod'
-import { has as managerHas, stopConnector } from '../services/tiktok-connector-manager.js'
+import { has as managerHas, stopConnector, syncLives } from '../services/tiktok-connector-manager.js'
 
 const cabineRoleAccess = (app) => [
   app.authenticate,
-  app.requirePapel(['franqueador_master', 'franqueado']),
+  app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'apresentador']),
 ]
 
 const reservarCabineSchema = z.object({
@@ -20,6 +21,18 @@ const encerrarSchema = z.object({
 
 const atualizarStatusSchema = z.object({
   status: z.enum(['disponivel', 'ativa', 'manutencao']),
+})
+
+const atualizarCabineSchema = z.object({
+  nome:      z.string().min(1).optional(),
+  tamanho:   z.string().optional(),
+  descricao: z.string().optional(),
+})
+
+const criarCabineSchema = z.object({
+  nome:      z.string().min(1, 'Nome é obrigatório'),
+  tamanho:   z.enum(['P', 'M', 'G', 'GG'], { required_error: 'Tamanho é obrigatório' }),
+  descricao: z.string().optional(),
 })
 
 function getRequestIp(request) {
@@ -75,19 +88,26 @@ export async function cabinesRoutes(app) {
     try {
       const result = await db.query(
         `SELECT c.id, c.numero, c.status, c.live_atual_id, c.contrato_id,
+                ct.tiktok_username,
                 COALESCE(l.cliente_id, ct.cliente_id) AS cliente_id,
                 u.nome AS apresentador_nome,
                 cl.nome AS cliente_nome,
                 l.iniciado_em,
                 COALESCE(ls.viewer_count, 0) AS viewer_count,
-                COALESCE(ls.gmv, 0) AS gmv_atual
+                COALESCE(ls.gmv, 0) AS gmv_atual,
+                COALESCE(ls.likes_count, 0) AS likes_count,
+                COALESCE(ls.comments_count, 0) AS comments_count,
+                COALESCE(ls.shares_count, 0) AS shares_count,
+                COALESCE(ls.gifts_diamonds, 0) AS gifts_diamonds,
+                COALESCE(ls.total_orders, 0) AS total_orders
          FROM cabines c
          LEFT JOIN contratos ct ON ct.id = c.contrato_id
          LEFT JOIN lives l ON l.id = c.live_atual_id
          LEFT JOIN users u ON u.id = l.apresentador_id
          LEFT JOIN clientes cl ON cl.id = COALESCE(l.cliente_id, ct.cliente_id)
          LEFT JOIN LATERAL (
-           SELECT viewer_count, gmv
+           SELECT viewer_count, gmv, likes_count, comments_count,
+                  shares_count, gifts_diamonds, total_orders
            FROM live_snapshots
            WHERE live_id = c.live_atual_id
            ORDER BY captured_at DESC
@@ -100,6 +120,11 @@ export async function cabinesRoutes(app) {
         ...c,
         viewer_count: Number(c.viewer_count ?? 0),
         gmv_atual: Number(c.gmv_atual ?? 0),
+        likes_count: Number(c.likes_count ?? 0),
+        comments_count: Number(c.comments_count ?? 0),
+        shares_count: Number(c.shares_count ?? 0),
+        gifts_diamonds: Number(c.gifts_diamonds ?? 0),
+        total_orders: Number(c.total_orders ?? 0),
       }))
     } finally {
       db.release()
@@ -143,10 +168,92 @@ export async function cabinesRoutes(app) {
     }
   })
 
+  // POST /v1/cabines — create a new cabine for the authenticated tenant
+  app.post('/v1/cabines', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
+  }, async (request, reply) => {
+    const parsed = criarCabineSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const { nome, tamanho, descricao } = parsed.data
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      // Atomic: compute next numero and insert in a single statement to avoid race conditions
+      const result = await db.query(
+        `INSERT INTO cabines (tenant_id, numero, nome, tamanho, descricao, status)
+         SELECT $1, COALESCE(MAX(numero), 0) + 1, $2, $3, $4, 'disponivel'
+         FROM cabines
+         WHERE tenant_id = $1
+         RETURNING id, numero, nome, tamanho, descricao, status, criado_em`,
+        [tenant_id, nome, tamanho ?? null, descricao ?? null]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally {
+      db.release()
+    }
+  })
+
+  // DELETE /v1/cabines/:id — delete a cabine (only if not in use)
+  app.delete('/v1/cabines/:id', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
+  }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      const cabineResult = await db.query(
+        `SELECT id, status, live_atual_id, contrato_id FROM cabines WHERE id = $1`,
+        [request.params.id]
+      )
+      const cabine = cabineResult.rows[0]
+
+      if (!cabine) return reply.code(404).send({ error: 'Cabine não encontrada' })
+
+      if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
+        return reply.code(409).send({ error: 'Cabine ao vivo não pode ser deletada' })
+      }
+
+      if (cabine.contrato_id) {
+        return reply.code(409).send({ error: 'Libere a cabine antes de deletá-la' })
+      }
+
+      await db.query(`DELETE FROM cabines WHERE id = $1`, [request.params.id])
+      return { ok: true }
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/cabines/:id — update name, size, description
+  app.patch('/v1/cabines/:id', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
+    const parsed = atualizarCabineSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const updates = parsed.data
+    const fields = Object.keys(updates)
+    if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+
+    const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
+    const values = [request.params.id, ...fields.map((f) => updates[f])]
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE cabines SET ${setClauses} WHERE id = $1 RETURNING id, nome, tamanho, descricao, numero`,
+        values
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Cabine não encontrada' })
+      return result.rows[0]
+    } finally { db.release() }
+  })
+
   // PATCH /v1/cabines/:id/reservar
   app.patch('/v1/cabines/:id/reservar', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const parsed = reservarCabineSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
     const { contrato_id } = parsed.data
@@ -308,7 +415,8 @@ export async function cabinesRoutes(app) {
   app.get('/v1/cabines/:id/historico', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const { tenant_id } = request.user
     const cabineId = request.params.id
-    const dias = parseInt(request.query.dias) || 90
+    const raw = parseInt(request.query.dias)
+    const dias = isNaN(raw) ? 90 : Math.min(Math.max(raw, 1), 365)
 
     const db = await app.dbTenant(tenant_id)
     try {
@@ -413,30 +521,75 @@ export async function cabinesRoutes(app) {
       const cabine = cabineQ.rows[0]
 
       if (!cabine) return reply.code(404).send({ error: 'Cabine não encontrada' })
-      if (cabine.status !== 'ao_vivo' || !cabine.live_atual_id) {
-        return reply.code(400).send({ error: 'Cabine não está ao vivo no momento' })
+
+      // Busca live em andamento vinculada a essa cabine — fonte única da verdade
+      // (não depende de cabine.status nem de cabine.live_atual_id estar setado)
+      const liveQSearch = await db.query(`
+        SELECT id FROM lives
+        WHERE cabine_id = $1 AND status = 'em_andamento'
+        ORDER BY iniciado_em DESC LIMIT 1
+      `, [cabineId])
+
+      let liveId = liveQSearch.rows[0]?.id
+      request.log?.info(
+        { cabineId, cabineStatus: cabine.status, cabineLiveAtualId: cabine.live_atual_id, liveEncontrada: liveId },
+        'live-atual: lookup'
+      )
+
+      if (!liveId) {
+        // Nenhuma live em_andamento para essa cabine — auto-corrige status se estava ao_vivo sem live
+        if (cabine.status === 'ao_vivo' || cabine.live_atual_id) {
+          await db.query(
+            `UPDATE cabines SET status = 'disponivel', live_atual_id = NULL WHERE id = $1`,
+            [cabineId]
+          )
+          request.log?.warn({ cabineId }, 'live-atual: cabine estava ao_vivo sem live em_andamento → normalizada para disponivel')
+        }
+        return reply.code(200).send({ live_ativa: false, message: 'Nenhuma live ativa nesta cabine' })
       }
 
-      const liveId = cabine.live_atual_id
+      // Se achou live mas cabine não estava linkada, sincroniza
+      if (cabine.live_atual_id !== liveId || cabine.status !== 'ao_vivo') {
+        await db.query(
+          `UPDATE cabines SET live_atual_id = $1, status = 'ao_vivo' WHERE id = $2`,
+          [liveId, cabineId]
+        )
+        request.log?.info({ cabineId, liveId }, 'live-atual: cabine sincronizada com live em andamento')
+      }
 
       const liveQ = await db.query(`
         SELECT l.iniciado_em, l.fat_gerado,
+               c.contrato_id,
                u.nome AS apresentador_nome,
-               cl.nome AS cliente_nome
+               cl.nome AS cliente_nome,
+               ct.tiktok_username
         FROM lives l
-        JOIN users u ON u.id = l.apresentador_id
-        JOIN clientes cl ON cl.id = l.cliente_id
+        LEFT JOIN cabines c ON c.id = l.cabine_id
+        LEFT JOIN users u ON u.id = l.apresentador_id
+        LEFT JOIN clientes cl ON cl.id = l.cliente_id
+        LEFT JOIN contratos ct ON ct.id = c.contrato_id
         WHERE l.id = $1
       `, [liveId])
       const liveData = liveQ.rows[0]
 
+      // Defesa: se por algum motivo a live sumiu entre o SELECT anterior e este,
+      // tratamos como sem live ativa em vez de retornar 500.
+      if (!liveData) {
+        request.log?.warn({ liveId, cabineId }, 'live-atual: live desapareceu entre queries')
+        return reply.code(200).send({ live_ativa: false, message: 'Live não encontrada' })
+      }
+
       const snapshotQ = await db.query(`
-        SELECT viewer_count, total_orders, gmv, likes_count, comments_count, captured_at
+        SELECT viewer_count, total_viewers, total_orders, gmv,
+               likes_count, comments_count, gifts_diamonds, shares_count, captured_at
         FROM live_snapshots
         WHERE live_id = $1
         ORDER BY captured_at DESC LIMIT 1
       `, [liveId])
-      const snapshot = snapshotQ.rows[0] || { viewer_count: 0, total_orders: 0, gmv: 0, likes_count: 0, comments_count: 0 }
+      const snapshot = snapshotQ.rows[0] || {
+        viewer_count: 0, total_viewers: 0, total_orders: 0, gmv: 0,
+        likes_count: 0, comments_count: 0, gifts_diamonds: 0, shares_count: 0,
+      }
 
       const topProdutoQ = await db.query(`
         SELECT produto_nome, quantidade, valor_total
@@ -451,13 +604,21 @@ export async function cabinesRoutes(app) {
       const duracaoMinutos = Math.floor((agora - iniciadoEm) / 1000 / 60)
 
       return {
+        live_ativa: true,
         live_id: liveId,
-        viewer_count: snapshot.viewer_count,
-        gmv_atual: parseFloat(snapshot.gmv),
-        total_orders: snapshot.total_orders,
+        contrato_id: liveData.contrato_id ?? null,
+        tiktok_username: liveData.tiktok_username ?? null,
+        viewer_count: Number(snapshot.viewer_count ?? 0),
+        total_viewers: Number(snapshot.total_viewers ?? 0),
+        gmv_atual: parseFloat(snapshot.gmv ?? 0),
+        total_orders: Number(snapshot.total_orders ?? 0),
+        likes_count: Number(snapshot.likes_count ?? 0),
+        comments_count: Number(snapshot.comments_count ?? 0),
+        gifts_diamonds: Number(snapshot.gifts_diamonds ?? 0),
+        shares_count: Number(snapshot.shares_count ?? 0),
         duracao_minutos: duracaoMinutos,
-        cliente_nome: liveData.cliente_nome,
-        apresentador_nome: liveData.apresentador_nome,
+        cliente_nome: liveData.cliente_nome ?? '',
+        apresentador_nome: liveData.apresentador_nome ?? '',
         iniciado_em: liveData.iniciado_em,
         top_produto: topProduto ? {
           nome: topProduto.produto_nome,
@@ -470,10 +631,111 @@ export async function cabinesRoutes(app) {
     }
   })
 
+  // ── POST /v1/cabines/:id/closer-notification ──────────────────────────────
+  // Gerente/Franqueado envia uma mensagem/dica para o closer da cabine.
+  // A mensagem é emitida via EventEmitter para o canal SSE do apresentador.
+  app.post('/v1/cabines/:id/closer-notification', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+  }, async (request, reply) => {
+    const { message, type = 'custom' } = request.body ?? {}
+    if (!message || typeof message !== 'string' || message.trim().length === 0) {
+      return reply.code(400).send({ error: 'message é obrigatório' })
+    }
+    if (message.length > 500) {
+      return reply.code(400).send({ error: 'mensagem excede 500 caracteres' })
+    }
+
+    const { tenant_id, sub: fromUserId } = request.user
+    const cabineId = request.params.id
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      // Valida que cabine existe e está ao vivo
+      const { rows } = await db.query(
+        `SELECT c.live_atual_id, l.apresentador_id
+         FROM cabines c
+         LEFT JOIN lives l ON l.id = c.live_atual_id
+         WHERE c.id = $1`,
+        [cabineId]
+      )
+      if (rows.length === 0) {
+        return reply.code(404).send({ error: 'Cabine não encontrada' })
+      }
+      const live = rows[0]
+
+      const notification = {
+        id: crypto.randomUUID(),
+        cabine_id: cabineId,
+        live_id: live.live_atual_id ?? null,
+        apresentador_id: live.apresentador_id ?? null,
+        from_user_id: fromUserId,
+        type,
+        message: message.trim(),
+        ts: Date.now(),
+      }
+
+      // Emite via EventEmitter — SSE do apresentador escuta `closer:${cabineId}`
+      const { getEmitter } = await import('../services/tiktok-connector-manager.js')
+      getEmitter().emit(`closer:${cabineId}`, notification)
+      if (live.apresentador_id) {
+        getEmitter().emit(`closer-user:${live.apresentador_id}`, notification)
+      }
+
+      request.log?.info({ cabineId, type, message: notification.message.slice(0, 60) },
+        'closer-notification enviada')
+      return reply.send({ ok: true, notification })
+    } finally {
+      db.release()
+    }
+  })
+
+  // ── GET /v1/cabines/:id/closer-notifications/stream ──────────────────────
+  // SSE para o apresentador receber mensagens do gerente em tempo real.
+  app.get('/v1/cabines/:id/closer-notifications/stream', {
+    preHandler: [app.authenticate, app.requirePapel(['apresentador', 'franqueado', 'franqueador_master', 'gerente'])],
+  }, async (request, reply) => {
+    const cabineId = request.params.id
+
+    reply.hijack()
+    reply.raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    })
+    reply.raw.flushHeaders()
+
+    const { getEmitter } = await import('../services/tiktok-connector-manager.js')
+    const emitter = getEmitter()
+    const eventName = `closer:${cabineId}`
+    const handler = (evt) => {
+      if (reply.raw.destroyed) return
+      try {
+        reply.raw.write(`data: ${JSON.stringify(evt)}\n\n`)
+      } catch {
+        emitter.off(eventName, handler)
+      }
+    }
+    emitter.on(eventName, handler)
+
+    const heartbeat = setInterval(() => {
+      if (!reply.raw.destroyed) reply.raw.write(': keep-alive\n\n')
+    }, 15_000)
+
+    await new Promise((resolve) => {
+      request.raw.once('close', resolve)
+      request.raw.once('error', resolve)
+    })
+
+    emitter.off(eventName, handler)
+    clearInterval(heartbeat)
+    try { reply.raw.end() } catch {}
+  })
+
   // PATCH /v1/cabines/:id/status
   app.patch('/v1/cabines/:id/status', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const parsed = atualizarStatusSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
     const { status } = parsed.data
@@ -554,7 +816,7 @@ export async function cabinesRoutes(app) {
   // POST /v1/lives — inicia live a partir da cabine reservada/ativa
   app.post('/v1/lives', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const parsed = iniciarLiveSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
     const { cabine_id } = parsed.data
@@ -634,6 +896,12 @@ export async function cabinesRoutes(app) {
         })
 
         await db.query('COMMIT')
+
+        // Não espera 60s do cron — sincroniza connector imediatamente
+        syncLives().catch(err =>
+          app.log.warn({ err, liveId: live.id }, 'syncLives pós-iniciar-live falhou')
+        )
+
         return reply.code(201).send(live)
       } catch (error) {
         await db.query('ROLLBACK')
@@ -667,7 +935,7 @@ export async function cabinesRoutes(app) {
   // PATCH /v1/lives/:id/encerrar
   app.patch('/v1/lives/:id/encerrar', { preHandler: cabineRoleAccess(app) }, async (request, reply) => {
     const parsed = encerrarSchema.safeParse(request.body)
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.errors[0].message })
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
     const { tenant_id, sub, papel } = request.user
     const ip = getRequestIp(request)
@@ -678,7 +946,7 @@ export async function cabinesRoutes(app) {
 
       try {
         const liveQ = await db.query(
-          `SELECT id, cabine_id, cliente_id, status
+          `SELECT id, cabine_id, cliente_id, status, iniciado_em
            FROM lives
            WHERE id = $1 AND status = 'em_andamento'
            FOR UPDATE`,
@@ -702,7 +970,7 @@ export async function cabinesRoutes(app) {
 
         const contratoQ = cabine?.contrato_id
           ? await db.query(
-              `SELECT id, status, comissao_pct
+              `SELECT id, status, comissao_pct, horas_contratadas, horas_consumidas
                FROM contratos
                WHERE id = $1
                FOR UPDATE`,
@@ -721,6 +989,17 @@ export async function cabinesRoutes(app) {
            WHERE id = $3`,
           [parsed.data.fat_gerado, comissao, request.params.id]
         )
+
+        // Deduct live duration from contrato's horas_consumidas
+        if (contrato && live.iniciado_em) {
+          const duracaoHoras = (Date.now() - new Date(live.iniciado_em).getTime()) / 3_600_000
+          await db.query(
+            `UPDATE contratos
+             SET horas_consumidas = horas_consumidas + $1
+             WHERE id = $2`,
+            [duracaoHoras, contrato.id]
+          )
+        }
 
         const proximoStatus = contrato?.status === 'ativo' ? 'ativa' : 'disponivel'
         const proximoContratoId = contrato?.status === 'ativo' ? contrato.id : null

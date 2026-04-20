@@ -9,7 +9,7 @@ export async function authRoutes(app) {
   app.post('/v1/auth/login', { config: { rateLimit: { max: isProd ? 5 : 100, timeWindow: '1 minute' } } }, async (request, reply) => {
     const parsed = loginSchema.safeParse(request.body)
     if (!parsed.success) {
-      return reply.code(400).send({ error: parsed.error.errors[0].message })
+      return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
     const { email, senha } = parsed.data
 
@@ -63,7 +63,7 @@ export async function authRoutes(app) {
   app.post('/v1/auth/refresh', { config: { rateLimit: { max: isProd ? 10 : 200, timeWindow: '1 minute' } } }, async (request, reply) => {
     const parsed = refreshSchema.safeParse(request.body)
     if (!parsed.success) {
-      return reply.code(400).send({ error: parsed.error.errors[0].message })
+      return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
 
     const tokenHash = crypto
