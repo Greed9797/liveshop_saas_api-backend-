@@ -327,7 +327,7 @@ describe('Route regressions: SQL and RBAC', () => {
     const releaseMock = vi.fn()
 
     app.decorate('authenticate', async (request) => {
-      request.user = { tenant_id: 'tenant-1', papel: 'franqueador_master' }
+      request.user = { tenant_id: 'tenant-1', papel: 'franqueado' }
     })
     app.decorate('requirePapel', (papeis) => async (request, reply) => {
       if (!papeis.includes(request.user.papel)) {

@@ -2,7 +2,7 @@ export async function analyticsRoutes(app) {
   app.get('/v1/analytics/franqueado/resumo', {
     preHandler: [
       app.authenticate,
-      app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+      app.requirePapel(['franqueado', 'gerente']),
     ],
   }, async (request) => {
     const { tenant_id } = request.user
@@ -130,7 +130,7 @@ export async function analyticsRoutes(app) {
   app.get('/v1/analytics/dashboard', {
     preHandler: [
       app.authenticate,
-      app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+      app.requirePapel(['franqueado', 'gerente']),
     ],
     schema: {
       querystring: {
