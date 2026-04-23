@@ -401,19 +401,39 @@ describe('Route regressions: SQL and RBAC', () => {
     await app.close()
   })
 
-  it('cliente dashboard returns next reservation and benchmark payload with tenant-safe ranking', async () => {
+  it('cliente dashboard returns monthly live performance payload with tenant-safe ranking', async () => {
     const app = Fastify()
+    const clienteId = '33333333-3333-4333-8333-333333333333'
     const queryMock = vi.fn()
       .mockResolvedValueOnce({ rows: [{ email: 'parceiro@teste.com' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'cli-1', nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
-      .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '12.50', ativado_em: '2026-04-03T20:00:00.000Z', assinado_em: '2026-04-01T15:00:00.000Z' }] })
-      .mockResolvedValueOnce({ rows: [{ faturamento_mes: '8200.00', lucro_estimado: '1230.00' }] })
-      .mockResolvedValueOnce({ rows: [{ mes_atual: '8200.00', mes_anterior: '7300.00' }] })
+      .mockResolvedValueOnce({ rows: [{ id: clienteId, nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '15.00', valor_fixo: '2400.00', horas_contratadas: '12.00', pacote_valor: null, horas_incluidas: null }] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: 'live-1',
+          iniciado_em: '2026-04-03T20:00:00.000Z',
+          encerrado_em: '2026-04-03T22:00:00.000Z',
+          cabine_numero: 3,
+          apresentador_nome: 'Closer 1',
+          status: 'encerrada',
+          total_faturamento: '3000.00',
+          comissao: '450.00',
+          total_vendas: '30',
+          pedidos: '24',
+          viewers: '500',
+          comentarios: '80',
+          likes: '1200',
+          shares: '20',
+          duracao_min: '120',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [{ mes_atual: '3000.00', mes_anterior: '2000.00' }] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ produto: 'Vestido', qty: '12', valor: '4500.00' }] })
-      .mockResolvedValueOnce({ rows: [{ cliente_id: 'cli-1', total: '1200.00', posicao: '2', total_participantes: '14' }] })
-      .mockResolvedValueOnce({ rows: [{ cabine_id: 'cab-3', cabine_numero: 3, status: 'reservada', contrato_id: 'ctr-1', ativado_em: '2026-04-03T20:00:00.000Z', assinado_em: '2026-04-01T15:00:00.000Z' }] })
-      .mockResolvedValueOnce({ rows: [{ nicho: 'Moda Feminina', meu_gmv: '8200.00', media_gmv_nicho: '10250.00', amostra_nicho: '9', media_gmv_geral: '17400.00', amostra_geral: '26', percentil_nicho: '0.68', percentil_geral: '0.41' }] })
+      .mockResolvedValueOnce({ rows: [{ produto: 'Vestido', qty: '12', valor: '1800.00' }] })
+      .mockResolvedValueOnce({ rows: [{ cliente_id: clienteId, total: '3000.00', posicao: '1', total_participantes: '3' }] })
+      .mockResolvedValueOnce({ rows: [{ nicho: 'Moda Feminina', meu_gmv: '3000.00', media_gmv_nicho: '2500.00', amostra_nicho: '9', media_gmv_geral: '4000.00', amostra_geral: '26', percentil_nicho: '0.68', percentil_geral: '0.41' }] })
+      .mockResolvedValueOnce({ rows: [{ hora: 20, total_lives: '1', gmv_total: '3000.00', pedidos: '24' }] })
+      .mockResolvedValueOnce({ rows: [{ mes: 4, total_lives: '1', gmv_total: '3000.00', itens_vendidos: '30', horas_live: '2.00' }] })
     const releaseMock = vi.fn()
 
     app.decorate('requirePapel', (papeis) => async (request, reply) => {
@@ -426,63 +446,246 @@ describe('Route regressions: SQL and RBAC', () => {
 
     await app.register(clienteDashboardRoutes)
 
-    const response = await app.inject({ method: 'GET', url: '/v1/cliente/dashboard' })
+    const response = await app.inject({ method: 'GET', url: '/v1/cliente/dashboard?mes=4&ano=2026' })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toEqual({
-      faturamento_mes: 8200,
-      crescimento_pct: 12,
-      volume_vendas: 12,
-      lucro_estimado: 1230,
+    expect(response.json()).toMatchObject({
+      periodo: { mes: 4, ano: 2026 },
+      faturamento_mes: 3000,
+      gmv_mes: 3000,
+      crescimento_pct: 50,
+      volume_vendas: 30,
+      itens_vendidos: 30,
+      lucro_estimado: 450,
+      horas_live: 2,
+      valor_investido_lives: 400,
+      roas: 7.5,
+      viewers: 500,
+      comentarios: 80,
+      likes: 1200,
+      shares: 20,
+      pedidos: 24,
+      total_lives: 1,
       live_ativa: null,
       mais_vendidos: [
         {
           produto: 'Vestido',
           qty: 12,
-          valor: 4500,
+          valor: 1800,
         },
       ],
       ranking_dia: {
-        posicao: 2,
-        gmv_dia: 1200,
-        total_participantes: 14,
+        posicao: 1,
+        gmv_periodo: 3000,
+        gmv_dia: 3000,
+        total_participantes: 3,
       },
-      proxima_reserva: {
-        cabine_id: 'cab-3',
-        cabine_numero: 3,
-        status: 'reservada',
-        contrato_id: 'ctr-1',
-        ativado_em: '2026-04-03T20:00:00.000Z',
-        assinado_em: '2026-04-01T15:00:00.000Z',
-      },
+      proxima_reserva: null,
       benchmark_nicho: {
         nicho: 'Moda Feminina',
-        meu_gmv: 8200,
-        media_gmv: 10250,
-        percentual_da_media: 80,
+        meu_gmv: 3000,
+        media_gmv: 2500,
+        percentual_da_media: 120,
         percentil: 0.68,
         amostra: 9,
-        acima_da_media: false,
+        acima_da_media: true,
       },
       benchmark_geral: {
         nicho: null,
-        meu_gmv: 8200,
-        media_gmv: 17400,
-        percentual_da_media: 47.1,
+        meu_gmv: 3000,
+        media_gmv: 4000,
+        percentual_da_media: 75,
         percentil: 0.41,
         amostra: 26,
         acima_da_media: false,
       },
+      melhores_horarios_venda: [
+        {
+          hora: 20,
+          label: '20h',
+          total_lives: 1,
+          gmv_total: 3000,
+          pedidos: 24,
+        },
+      ],
+      series_mensais: [
+        {
+          mes: 4,
+          ano: 2026,
+          total_lives: 1,
+          gmv_total: 3000,
+          itens_vendidos: 30,
+          horas_live: 2,
+          valor_investido_lives: 400,
+          roas: 7.5,
+        },
+      ],
+      lives: [
+        {
+          id: 'live-1',
+          total_faturamento: 3000,
+          gmv: 3000,
+          comissao: 450,
+          total_vendas: 30,
+          itens_vendidos: 30,
+          duracao_min: 120,
+          duracao_horas: 2,
+          valor_investido: 400,
+          roas: 7.5,
+        },
+      ],
     })
 
-    const rankingSql = queryMock.mock.calls[7][0]
-    expect(rankingSql).toContain('WHERE tenant_id = $1')
-    expect(rankingSql).toContain("date_trunc('day', iniciado_em) = date_trunc('day', NOW())")
+    const livesSql = queryMock.mock.calls[3][0]
+    expect(livesSql).toContain('final_peak_viewers')
+    expect(livesSql).toContain("make_timestamptz($3::int, $4::int")
 
-    const benchmarkSql = queryMock.mock.calls[9][0]
+    const rankingSql = queryMock.mock.calls[7][0]
+    expect(rankingSql).toContain('l.tenant_id = $1')
+    expect(rankingSql).toContain('l.iniciado_em >= p.inicio')
+
+    const benchmarkSql = queryMock.mock.calls[8][0]
     expect(benchmarkSql).toContain('WITH base_90_dias AS')
     expect(benchmarkSql).toContain('PERCENT_RANK() OVER')
     expect(releaseMock).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
+  it('cliente dashboard returns empty payload when no active cliente is linked', async () => {
+    const app = Fastify()
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ email: 'sem-cliente@teste.com' }] })
+      .mockResolvedValueOnce({ rows: [] })
+    const releaseMock = vi.fn()
+
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      request.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'cliente_parceiro' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+
+    await app.register(clienteDashboardRoutes)
+
+    const response = await app.inject({ method: 'GET', url: '/v1/cliente/dashboard?mes=4&ano=2026' })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      periodo: { mes: 4, ano: 2026 },
+      faturamento_mes: 0,
+      volume_vendas: 0,
+      valor_investido_lives: 0,
+      melhores_horarios_venda: [],
+      lives: [],
+    })
+    expect(queryMock).toHaveBeenCalledTimes(2)
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
+  it('cliente lives and vendas endpoints return enriched monthly history', async () => {
+    for (const url of ['/v1/cliente/lives?mes=4&ano=2026', '/v1/cliente/vendas?mes=4&ano=2026']) {
+      const app = Fastify()
+      const clienteId = '33333333-3333-4333-8333-333333333333'
+      const queryMock = vi.fn()
+        .mockResolvedValueOnce({ rows: [{ email: 'parceiro@teste.com' }] })
+        .mockResolvedValueOnce({ rows: [{ id: clienteId, nicho: 'Moda Feminina', nome: 'Parceiro Alpha' }] })
+        .mockResolvedValueOnce({ rows: [{ id: 'ctr-1', comissao_pct: '10.00', valor_fixo: '1000.00', horas_contratadas: '10.00', pacote_valor: null, horas_incluidas: null }] })
+        .mockResolvedValueOnce({
+          rows: [{
+            id: 'live-1',
+            iniciado_em: '2026-04-03T20:00:00.000Z',
+            encerrado_em: '2026-04-03T21:30:00.000Z',
+            cabine_numero: 3,
+            apresentador_nome: 'Closer 1',
+            status: 'encerrada',
+            total_faturamento: '1800.00',
+            comissao: '180.00',
+            total_vendas: '18',
+            pedidos: '14',
+            viewers: '250',
+            comentarios: '40',
+            likes: '800',
+            shares: '12',
+            duracao_min: '90',
+          }],
+        })
+      const releaseMock = vi.fn()
+
+      app.decorate('requirePapel', (papeis) => async (request, reply) => {
+        request.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'cliente_parceiro' }
+        if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+      })
+      app.decorate('dbTenant', async () => ({ query: queryMock, release: releaseMock }))
+
+      await app.register(clienteDashboardRoutes)
+
+      const response = await app.inject({ method: 'GET', url })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.json()).toMatchObject({
+        periodo: { mes: 4, ano: 2026 },
+        resumo: {
+          gmv_total: 1800,
+          total_vendas: 18,
+          itens_vendidos: 18,
+          total_lives: 1,
+          horas_live: 1.5,
+          valor_investido_lives: 150,
+          roas: 12,
+          viewers: 250,
+          comentarios: 40,
+          likes: 800,
+          shares: 12,
+          pedidos: 14,
+        },
+        lives: [
+          {
+            id: 'live-1',
+            gmv: 1800,
+            duracao_min: 90,
+            duracao_horas: 1.5,
+            valor_investido: 150,
+            roas: 12,
+          },
+        ],
+      })
+      expect(queryMock.mock.calls[3][0]).toContain("make_timestamptz($3::int, $4::int")
+      expect(releaseMock).toHaveBeenCalledTimes(1)
+
+      await app.close()
+    }
+  })
+
+  it('cliente cabines endpoints are blocked with 403 for cliente_parceiro', async () => {
+    const app = Fastify()
+    const dbTenantMock = vi.fn()
+
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      request.user = { sub: 'user-1', tenant_id: 'tenant-1', papel: 'cliente_parceiro' }
+      if (!papeis.includes(request.user.papel)) return reply.code(403).send({ error: 'Forbidden' })
+    })
+    app.decorate('dbTenant', dbTenantMock)
+
+    await app.register(clienteDashboardRoutes)
+
+    const responses = await Promise.all([
+      app.inject({ method: 'GET', url: '/v1/cliente/cabines' }),
+      app.inject({ method: 'GET', url: '/v1/cliente/cabines/33333333-3333-4333-8333-333333333333' }),
+      app.inject({ method: 'GET', url: '/v1/cliente/cabines/33333333-3333-4333-8333-333333333333/solicitacoes' }),
+      app.inject({
+        method: 'POST',
+        url: '/v1/cliente/cabines/33333333-3333-4333-8333-333333333333/solicitar-live',
+        payload: { data_solicitada: '2026-04-30', hora_inicio: '20:00', hora_fim: '22:00' },
+      }),
+    ])
+
+    for (const response of responses) {
+      expect(response.statusCode).toBe(403)
+      expect(response.json()).toEqual({ error: 'Cliente parceiro não tem acesso a cabines' })
+    }
+    expect(dbTenantMock).not.toHaveBeenCalled()
 
     await app.close()
   })
