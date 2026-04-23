@@ -865,6 +865,18 @@ describe('Route regressions: SQL and RBAC', () => {
       await app.close()
     })
 
+    it('GET /tiktokqs5mPOzi5Iq2tckHy7mVhYMDBFtf0oDd.txt expõe o arquivo de verificação do TikTok', async () => {
+      const { app } = await buildTiktokApp()
+      const res = await app.inject({
+        method: 'GET',
+        url: '/tiktokqs5mPOzi5Iq2tckHy7mVhYMDBFtf0oDd.txt',
+      })
+      expect(res.statusCode).toBe(200)
+      expect(res.headers['content-type']).toMatch(/text\/plain/)
+      expect(res.body).toBe('tiktok-developers-site-verification=qs5mPOzi5Iq2tckHy7mVhYMDBFtf0oDd')
+      await app.close()
+    })
+
     it('GET /v1/lives/:liveId/events retorna 404 se live não existe ou não está em_andamento', async () => {
       process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
       process.env.TIKTOK_CLIENT_KEY = 'test-client-key'

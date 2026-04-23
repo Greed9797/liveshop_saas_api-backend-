@@ -9,6 +9,10 @@ import { getEmitter } from '../services/tiktok-connector-manager.js'
 import { createSignedState, verifySignedState } from '../services/oauth-state.js'
 
 export async function tiktokRoutes(app) {
+  const tiktokUrlVerification = {
+    fileName: 'tiktokqs5mPOzi5Iq2tckHy7mVhYMDBFtf0oDd.txt',
+    body: 'tiktok-developers-site-verification=qs5mPOzi5Iq2tckHy7mVhYMDBFtf0oDd',
+  }
   const TIKTOK_CLIENT_KEY    = process.env.TIKTOK_CLIENT_KEY;
   const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
   const TIKTOK_REDIRECT_URI  = process.env.TIKTOK_REDIRECT_URI;
@@ -25,6 +29,12 @@ export async function tiktokRoutes(app) {
       '[TikTok OAuth] Credenciais ausentes; rotas de OAuth ficarão indisponíveis até configurar TIKTOK_CLIENT_KEY, TIKTOK_CLIENT_SECRET e TIKTOK_REDIRECT_URI'
     )
   }
+
+  app.get(`/${tiktokUrlVerification.fileName}`, async (request, reply) => {
+    return reply
+      .type('text/plain; charset=utf-8')
+      .send(tiktokUrlVerification.body)
+  })
 
   /**
    * GET /v1/tiktok/connect
