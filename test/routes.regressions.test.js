@@ -1,3 +1,4 @@
+import crypto from 'node:crypto'
 import Fastify from 'fastify'
 import fp from 'fastify-plugin'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,6 +17,8 @@ const ENV_KEYS = [
   'TIKTOK_CLIENT_KEY',
   'TIKTOK_CLIENT_SECRET',
   'TIKTOK_REDIRECT_URI',
+  'TIKTOK_WEBHOOK_REQUIRE_SIGNATURE',
+  'TIKTOK_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS',
 ]
 
 let envSnapshot = {}
@@ -805,6 +808,19 @@ describe('Route regressions: SQL and RBAC', () => {
 
   // ── TikTok OAuth CSRF regression ─────────────────────────────────────────
   describe('TikTok OAuth CSRF (signed state)', () => {
+    function signTikTokWebhookPayload(payload, timestamp = Math.floor(Date.now() / 1000)) {
+      const body = JSON.stringify(payload)
+      const signature = crypto
+        .createHmac('sha256', process.env.TIKTOK_CLIENT_SECRET)
+        .update(`${timestamp}.${body}`)
+        .digest('hex')
+
+      return {
+        body,
+        signature: `t=${timestamp},s=${signature}`,
+      }
+    }
+
     async function buildTiktokApp() {
       process.env.JWT_SECRET = 'test-secret-32-chars-minimum-please-ok'
       process.env.TIKTOK_CLIENT_KEY = 'test-client-key'
@@ -874,6 +890,79 @@ describe('Route regressions: SQL and RBAC', () => {
       })
       expect(res.statusCode).toBe(404)
       expect(res.json().error).toMatch(/não encontrada|não está ao vivo/i)
+      await app.close()
+    })
+
+    it('POST /v1/tiktok/webhook registra evento assinado e revoga tokens no authorization.removed', async () => {
+      const { app, queryMock } = await buildTiktokApp()
+      const payload = {
+        client_key: 'test-client-key',
+        event: 'authorization.removed',
+        create_time: 1_615_338_610,
+        user_openid: 'open-id-1',
+        content: '{"reason":1}',
+      }
+      const { body, signature } = signTikTokWebhookPayload(payload)
+
+      queryMock.mockReset()
+      queryMock
+        .mockResolvedValueOnce({ rows: [{ id: 'tenant-1' }] })
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] })
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/tiktok/webhook',
+        headers: {
+          'content-type': 'application/json',
+          'tiktok-signature': signature,
+        },
+        payload: body,
+      })
+
+      expect(res.statusCode).toBe(200)
+      expect(res.json()).toEqual({ received: true })
+      expect(queryMock).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('SELECT id FROM tenants WHERE tiktok_user_id = $1'),
+        ['open-id-1']
+      )
+      expect(queryMock).toHaveBeenNthCalledWith(
+        2,
+        expect.stringContaining('INSERT INTO webhook_eventos'),
+        ['tenant-1', 'authorization.removed', body]
+      )
+      expect(queryMock.mock.calls[2][0]).toContain('SET tiktok_access_token = NULL')
+
+      await app.close()
+    })
+
+    it('POST /v1/tiktok/webhook rejeita assinatura inválida quando validação obrigatória está ativa', async () => {
+      process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE = 'true'
+      const { app, queryMock } = await buildTiktokApp()
+      const body = JSON.stringify({
+        client_key: 'test-client-key',
+        event: 'authorization.removed',
+        create_time: 1_615_338_610,
+        user_openid: 'open-id-1',
+        content: '{"reason":1}',
+      })
+      queryMock.mockClear()
+
+      const res = await app.inject({
+        method: 'POST',
+        url: '/v1/tiktok/webhook',
+        headers: {
+          'content-type': 'application/json',
+          'tiktok-signature': `t=${Math.floor(Date.now() / 1000)},s=deadbeef`,
+        },
+        payload: body,
+      })
+
+      expect(res.statusCode).toBe(401)
+      expect(res.json().error).toMatch(/Assinatura TikTok inválida/)
+      expect(queryMock).not.toHaveBeenCalled()
+
       await app.close()
     })
 

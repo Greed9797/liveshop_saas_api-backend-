@@ -12,6 +12,10 @@ export async function tiktokRoutes(app) {
   const TIKTOK_CLIENT_KEY    = process.env.TIKTOK_CLIENT_KEY;
   const TIKTOK_CLIENT_SECRET = process.env.TIKTOK_CLIENT_SECRET;
   const TIKTOK_REDIRECT_URI  = process.env.TIKTOK_REDIRECT_URI;
+  const requireWebhookSignature = process.env.TIKTOK_WEBHOOK_REQUIRE_SIGNATURE === 'true'
+  const webhookSignatureToleranceSeconds = Number(
+    process.env.TIKTOK_WEBHOOK_SIGNATURE_TOLERANCE_SECONDS ?? 300
+  )
   const hasOauthConfig = Boolean(
     TIKTOK_CLIENT_KEY && TIKTOK_CLIENT_SECRET && TIKTOK_REDIRECT_URI
   )
@@ -147,6 +151,75 @@ export async function tiktokRoutes(app) {
       tiktok_user_id: t.tiktok_user_id ?? null,
       token_expires_at: t.tiktok_token_expires_at ?? null,
     })
+  })
+
+  /**
+   * POST /v1/tiktok/webhook
+   * Recebe eventos assíncronos do TikTok Developer Portal.
+   */
+  app.post('/v1/tiktok/webhook', async (request, reply) => {
+    const payload = isObject(request.body) ? request.body : {}
+    const eventType = typeof payload.event === 'string' ? payload.event : 'UNKNOWN'
+    const userOpenId = typeof payload.user_openid === 'string' ? payload.user_openid : null
+
+    const signatureResult = verifyTikTokWebhookSignature({
+      header: request.headers['tiktok-signature'],
+      payload,
+      rawBody: request.rawBody,
+      clientSecret: TIKTOK_CLIENT_SECRET,
+      toleranceSeconds: webhookSignatureToleranceSeconds,
+    })
+
+    if (!signatureResult.ok) {
+      app.log.warn(
+        { reason: signatureResult.reason, eventType },
+        '[TikTok Webhook] Assinatura ausente ou inválida'
+      )
+
+      if (requireWebhookSignature) {
+        return reply.code(401).send({ error: 'Assinatura TikTok inválida' })
+      }
+    }
+
+    if (TIKTOK_CLIENT_KEY && payload.client_key && payload.client_key !== TIKTOK_CLIENT_KEY) {
+      app.log.warn(
+        { eventType, receivedClientKey: payload.client_key },
+        '[TikTok Webhook] client_key diferente da configuração local'
+      )
+    }
+
+    let tenantId = null
+
+    try {
+      if (userOpenId) {
+        const { rows } = await app.db.query(
+          `SELECT id FROM tenants WHERE tiktok_user_id = $1 LIMIT 1`,
+          [userOpenId]
+        )
+        tenantId = rows[0]?.id ?? null
+      }
+
+      await app.db.query(
+        `INSERT INTO webhook_eventos (tenant_id, source, event_type, payload_raw)
+         VALUES ($1, 'tiktok', $2, $3::jsonb)`,
+        [tenantId, eventType, JSON.stringify(payload)]
+      )
+
+      if (eventType === 'authorization.removed' && tenantId) {
+        await app.db.query(
+          `UPDATE tenants
+           SET tiktok_access_token = NULL,
+               tiktok_refresh_token = NULL,
+               tiktok_token_expires_at = NULL
+           WHERE id = $1`,
+          [tenantId]
+        )
+      }
+    } catch (err) {
+      app.log.error({ err, eventType, userOpenId }, '[TikTok Webhook] Falha ao processar evento')
+    }
+
+    return reply.code(200).send({ received: true })
   })
 
   // ── POST /v1/tiktok/test-connector — inicia conector para qualquer @username (dev only) ──
@@ -344,4 +417,67 @@ function _errorPage(message) {
     <button onclick="window.close()" style="padding:8px 16px;cursor:pointer">Fechar</button>
   </div>
 </body></html>`
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function verifyTikTokWebhookSignature({ header, payload, rawBody, clientSecret, toleranceSeconds }) {
+  const signatureHeader = Array.isArray(header) ? header[0] : header
+
+  if (!signatureHeader || typeof signatureHeader !== 'string') {
+    return { ok: false, reason: 'missing_signature' }
+  }
+  if (!clientSecret) {
+    return { ok: false, reason: 'missing_client_secret' }
+  }
+
+  const parts = Object.fromEntries(
+    signatureHeader
+      .split(',')
+      .map((item) => item.split('=').map((part) => part.trim()))
+      .filter(([key, value]) => key && value)
+  )
+  const timestamp = parts.t
+  const receivedSignature = parts.s
+
+  if (!timestamp || !receivedSignature) {
+    return { ok: false, reason: 'malformed_signature' }
+  }
+
+  const timestampSeconds = Number(timestamp)
+  if (!Number.isFinite(timestampSeconds)) {
+    return { ok: false, reason: 'invalid_timestamp' }
+  }
+
+  if (!/^[a-f0-9]+$/i.test(receivedSignature)) {
+    return { ok: false, reason: 'invalid_signature_format' }
+  }
+
+  const body = typeof rawBody === 'string'
+    ? rawBody
+    : JSON.stringify(payload ?? {})
+  const expectedSignature = crypto
+    .createHmac('sha256', clientSecret)
+    .update(`${timestamp}.${body}`)
+    .digest('hex')
+
+  const received = Buffer.from(receivedSignature, 'hex')
+  const expected = Buffer.from(expectedSignature, 'hex')
+
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
+    return { ok: false, reason: 'signature_mismatch' }
+  }
+
+  const ageSeconds = Math.abs(Date.now() / 1000 - timestampSeconds)
+  if (
+    Number.isFinite(toleranceSeconds) &&
+    toleranceSeconds > 0 &&
+    ageSeconds > toleranceSeconds
+  ) {
+    return { ok: false, reason: 'expired_signature' }
+  }
+
+  return { ok: true }
 }
