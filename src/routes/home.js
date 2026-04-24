@@ -33,8 +33,9 @@ export async function homeRoutes(app) {
       const fatLiquido = fatBruto - totalCustos
 
       // 2. Cabines (Status real-time do TikTok usando snapshots via LATERAL JOIN)
+      // Filtra ativo IS NOT FALSE para coincidir com a tela de configurações
       const cabinesQ = await db.query(`
-        SELECT 
+        SELECT
             c.numero, c.status, c.live_atual_id,
             l.iniciado_em,
             cl.nome AS cliente_nome,
@@ -46,11 +47,12 @@ export async function homeRoutes(app) {
         LEFT JOIN clientes cl ON cl.id = l.cliente_id
         LEFT JOIN users u ON u.id = l.apresentador_id
         LEFT JOIN LATERAL (
-            SELECT viewer_count, gmv 
-            FROM live_snapshots 
-            WHERE live_id = c.live_atual_id 
+            SELECT viewer_count, gmv
+            FROM live_snapshots
+            WHERE live_id = c.live_atual_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
+        WHERE c.ativo IS NOT FALSE
         ORDER BY c.numero
       `)
 
@@ -74,21 +76,25 @@ export async function homeRoutes(app) {
       });
 
       // 3. Resumo do Mês
-      const clientesQ = await db.query(`SELECT COUNT(*) AS total FROM clientes WHERE status = 'ativo'`)
+      // Clientes ativos = todos com status não-inativo (coincide com tela de clientes)
+      const clientesQ = await db.query(`
+        SELECT COUNT(*) AS total FROM clientes
+        WHERE status NOT IN ('cancelado', 'inativo')
+      `)
+      // Novos clientes do mês = clientes criados no mês corrente
       const novosClientesQ = await db.query(`
-        SELECT COUNT(*) AS total FROM contratos 
-        WHERE date_trunc('month', assinado_em) = date_trunc('month', NOW())
+        SELECT COUNT(*) AS total FROM clientes
+        WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
+              = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
+          AND status NOT IN ('cancelado', 'inativo')
       `)
-      // Assumindo que o contrato fica cancelado no churn
-      const churnQ = await db.query(`
-        SELECT COUNT(*) AS total FROM contratos 
-        WHERE status = 'cancelado' 
-      `)
-      
+      // GMV do mês = apenas lives encerradas (mesma fonte do Analytics)
       const livesMesQ = await db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
         FROM lives
-        WHERE date_trunc('month', iniciado_em) = date_trunc('month', NOW())
+        WHERE status = 'encerrada'
+          AND date_trunc('month', iniciado_em AT TIME ZONE 'America/Sao_Paulo')
+              = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
       `)
 
       const mediaViewersQ = await db.query(`
@@ -136,7 +142,6 @@ export async function homeRoutes(app) {
         // Resumo do mês
         clientes_ativos:   Number(clientesQ.rows[0].total),
         novos_clientes:    Number(novosClientesQ.rows[0].total),
-        churn_mes:         Number(churnQ.rows[0].total),
         lives_mes:         Number(livesMesQ.rows[0].lives_mes),
         gmv_lives_mes:     parseFloat(Number(livesMesQ.rows[0].gmv_lives_mes).toFixed(2)),
         media_viewers:     Math.round(Number(mediaViewersQ.rows[0].media)),

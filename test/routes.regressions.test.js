@@ -394,7 +394,7 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(clientesSql).toContain('JOIN clientes c ON c.id = l.cliente_id')
 
     const heatmapSql = queryMock.mock.calls[3][0]
-    expect(heatmapSql).toContain('EXTRACT(HOUR FROM l.iniciado_em)::int AS hora')
+    expect(heatmapSql).toContain("EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora")
 
     expect(releaseMock).toHaveBeenCalledTimes(1)
 

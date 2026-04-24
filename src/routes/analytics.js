@@ -66,13 +66,13 @@ export async function analyticsRoutes(app) {
 
       const heatmapHorariosQ = await db.query(`
         SELECT
-          EXTRACT(HOUR FROM l.iniciado_em)::int AS hora,
+          EXTRACT(HOUR FROM l.iniciado_em AT TIME ZONE 'America/Sao_Paulo')::int AS hora,
           COUNT(*) AS total_lives,
           COALESCE(SUM(l.fat_gerado), 0) AS gmv_total
         FROM lives l
         WHERE l.status = 'encerrada'
-        GROUP BY hora
-        ORDER BY hora ASC
+        GROUP BY 1
+        ORDER BY 1 ASC
       `)
 
       const eficienciaCabinesQ = await db.query(`
