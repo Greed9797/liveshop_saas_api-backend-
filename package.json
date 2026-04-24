@@ -6,7 +6,7 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "nodemon --watch src src/server.js",
-    "start": "node src/server.js",
+    "start": "node apply_migrations.js && node src/server.js",
     "test": "vitest run test/*.test.js",
     "test:watch": "vitest",
     "e2e": "playwright test --config=e2e/playwright.config.js",
