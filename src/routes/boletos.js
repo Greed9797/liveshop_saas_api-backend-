@@ -4,7 +4,7 @@ import { validarWebhookToken } from '../services/asaas.js'
 export async function boletosRoutes(app) {
   const boletoAccess = [
     app.authenticate,
-    app.requirePapel(['franqueado', 'gerente', 'cliente_parceiro']),
+    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'cliente_parceiro']),
   ]
   
   // GET /v1/boletos/alertas
