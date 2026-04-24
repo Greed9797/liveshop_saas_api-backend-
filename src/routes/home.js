@@ -81,14 +81,14 @@ export async function homeRoutes(app) {
       const clientesQ = await db.query(`
         SELECT COUNT(*) AS total
         FROM clientes
-        WHERE status IN ('ativo', 'risco_churn', 'alerta', 'satisfeito')
+        WHERE status NOT IN ('cancelado')
       `)
       // Novos clientes do mês = clientes criados no mês corrente
       const novosClientesQ = await db.query(`
         SELECT COUNT(*) AS total FROM clientes
         WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-          AND status NOT IN ('cancelado', 'inativo')
+          AND status NOT IN ('cancelado')
       `)
       // GMV do mês = apenas lives encerradas (mesma fonte do Analytics)
       const livesMesQ = await db.query(`

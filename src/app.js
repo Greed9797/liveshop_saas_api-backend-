@@ -33,7 +33,12 @@ export async function buildApp(opts = {}) {
   })
 
   await app.register(cors, {
-    origin: process.env.CORS_ORIGIN ?? (process.env.NODE_ENV === 'production' ? false : true),
+    origin: process.env.CORS_ORIGIN
+      ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+      : (process.env.NODE_ENV === 'production'
+          ? ['https://livelab-3601f.web.app', 'https://livelab-3601f.firebaseapp.com']
+          : true),
+    credentials: true,
     allowedHeaders: ['Authorization', 'Content-Type', 'Accept'],
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   })
