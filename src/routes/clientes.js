@@ -22,7 +22,7 @@ const createSchema = z.object({
 
 export async function clientesRoutes(app) {
   // POST /v1/clientes
-  app.post('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.post('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const parsed = createSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -62,7 +62,7 @@ export async function clientesRoutes(app) {
   // POST /v1/clientes/geocode-pending — preenche lat/lng de clientes existentes
   // (utilizado uma vez para popular clientes cadastrados antes do auto-geocoding)
   app.post('/v1/clientes/geocode-pending', {
-    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+    preHandler: app.requirePapel(['franqueado', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
@@ -104,7 +104,7 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes
-  app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request) => {
+  app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -131,7 +131,7 @@ export async function clientesRoutes(app) {
   })
 
   // GET /v1/clientes/:id
-  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.get('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -146,7 +146,7 @@ export async function clientesRoutes(app) {
   })
 
   // PATCH /v1/clientes/:id
-  app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status']
     const updates = Object.fromEntries(

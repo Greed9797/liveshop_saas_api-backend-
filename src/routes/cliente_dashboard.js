@@ -1,275 +1,442 @@
+const DASHBOARD_TZ = 'America/Sao_Paulo'
+
+function toNumber(value) {
+  const parsed = Number(value ?? 0)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function toInt(value) {
+  return Math.round(toNumber(value))
+}
+
+function round2(value) {
+  return Number(toNumber(value).toFixed(2))
+}
+
+function parsePeriodo(query = {}) {
+  const now = new Date()
+  const mes = Number.parseInt(query.mes, 10)
+  const ano = Number.parseInt(query.ano, 10)
+
+  return {
+    mes: mes >= 1 && mes <= 12 ? mes : now.getMonth() + 1,
+    ano: ano >= 2000 && ano <= 2100 ? ano : now.getFullYear(),
+  }
+}
+
+function calcularCustoHora(contrato) {
+  const valorContrato = toNumber(contrato?.valor_fixo)
+  const valorPacote = toNumber(contrato?.pacote_valor)
+  const horasContrato = toNumber(contrato?.horas_contratadas)
+  const horasPacote = toNumber(contrato?.horas_incluidas)
+
+  const valorBase = valorContrato > 0 ? valorContrato : valorPacote
+  const horasBase = horasContrato > 0 ? horasContrato : horasPacote
+
+  return valorBase > 0 && horasBase > 0 ? valorBase / horasBase : 0
+}
+
+function emptyLivesPayload(periodo) {
+  return {
+    periodo,
+    resumo: {
+      total_faturamento: 0,
+      gmv_total: 0,
+      total_vendas: 0,
+      itens_vendidos: 0,
+      total_lives: 0,
+      horas_live: 0,
+      valor_investido_lives: 0,
+      roas: 0,
+      viewers: 0,
+      comentarios: 0,
+      likes: 0,
+      shares: 0,
+      pedidos: 0,
+    },
+    lives: [],
+  }
+}
+
+function emptyDashboard(periodo) {
+  return {
+    periodo,
+    faturamento_mes: 0,
+    gmv_mes: 0,
+    crescimento_pct: 0,
+    volume_vendas: 0,
+    itens_vendidos: 0,
+    lucro_estimado: 0,
+    horas_live_mes: 0,
+    horas_live: 0,
+    valor_investido_lives: 0,
+    roas: 0,
+    viewers: 0,
+    comentarios: 0,
+    likes: 0,
+    shares: 0,
+    pedidos: 0,
+    total_lives: 0,
+    live_ativa: null,
+    mais_vendidos: [],
+    ranking_dia: null,
+    ranking_periodo: null,
+    proxima_reserva: null,
+    benchmark_nicho: null,
+    benchmark_geral: null,
+    melhores_horarios_venda: [],
+    series_mensais: [],
+    lives: [],
+  }
+}
+
+function buildBenchmark({ niche, meuGmv, mediaGmv, amostra, percentil, minimumSample }) {
+  const media = toNumber(mediaGmv)
+  const sampleSize = toInt(amostra)
+
+  if (sampleSize < minimumSample) {
+    return null
+  }
+
+  const meu = toNumber(meuGmv)
+  const percentualDaMedia = media > 0 ? round2((meu / media) * 100) : 0
+
+  return {
+    nicho: niche,
+    meu_gmv: round2(meu),
+    media_gmv: round2(media),
+    percentual_da_media: percentualDaMedia,
+    percentil: percentil == null ? null : round2(percentil),
+    amostra: sampleSize,
+    acima_da_media: meu > media,
+  }
+}
+
+async function getClienteVinculado(db, tenantId, userId) {
+  const userQ = await db.query(
+    `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
+    [userId, tenantId]
+  )
+  const email = userQ.rows[0]?.email
+
+  if (!email) {
+    return null
+  }
+
+  const clienteQ = await db.query(
+    `SELECT id, nicho, nome
+     FROM clientes
+     WHERE tenant_id = $1
+       AND email = $2
+       AND status = 'ativo'
+     LIMIT 1`,
+    [tenantId, email]
+  )
+
+  return clienteQ.rows[0] ?? null
+}
+
+async function getContratoAtivo(db, tenantId, clienteId) {
+  const contratoQ = await db.query(`
+    SELECT
+      c.id,
+      c.comissao_pct,
+      c.valor_fixo,
+      c.horas_contratadas,
+      c.ativado_em,
+      c.assinado_em,
+      p.valor AS pacote_valor,
+      p.horas_incluidas
+    FROM contratos c
+    LEFT JOIN pacotes p ON p.id = c.pacote_id AND p.tenant_id = c.tenant_id
+    WHERE c.tenant_id = $1
+      AND c.cliente_id = $2
+      AND c.status = 'ativo'
+    ORDER BY c.ativado_em DESC NULLS LAST, c.criado_em DESC
+    LIMIT 1
+  `, [tenantId, clienteId])
+
+  return contratoQ.rows[0] ?? null
+}
+
+async function fetchClienteLives(db, tenantId, clienteId, periodo, custoHora) {
+  const livesQ = await db.query(`
+    WITH periodo AS (
+      SELECT
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') AS inicio,
+        make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') + INTERVAL '1 month' AS fim
+    )
+    SELECT
+      l.id,
+      l.iniciado_em,
+      l.encerrado_em,
+      c.numero AS cabine_numero,
+      u.nome AS apresentador_nome,
+      l.status,
+      COALESCE(l.fat_gerado, 0) AS total_faturamento,
+      COALESCE(l.comissao_calculada, 0) AS comissao,
+      COALESCE(prod.itens, 0) AS total_vendas,
+      COALESCE(l.final_orders_count, snap.total_orders, prod.itens, 0) AS pedidos,
+      COALESCE(l.final_peak_viewers, snap.peak_viewers, snap.total_viewers, 0) AS viewers,
+      COALESCE(l.final_total_comments, snap.comments_count, 0) AS comentarios,
+      COALESCE(l.final_total_likes, snap.likes_count, 0) AS likes,
+      COALESCE(l.final_total_shares, snap.shares_count, 0) AS shares,
+      GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60, 0) AS duracao_min
+    FROM lives l
+    CROSS JOIN periodo p
+    LEFT JOIN cabines c ON c.id = l.cabine_id
+    LEFT JOIN users u ON u.id = l.apresentador_id
+    LEFT JOIN LATERAL (
+      SELECT SUM(lp.quantidade) AS itens
+      FROM live_products lp
+      WHERE lp.live_id = l.id
+    ) prod ON true
+    LEFT JOIN LATERAL (
+      SELECT
+        MAX(ls.viewer_count) AS peak_viewers,
+        MAX(ls.total_viewers) AS total_viewers,
+        MAX(ls.total_orders) AS total_orders,
+        MAX(ls.likes_count) AS likes_count,
+        MAX(ls.comments_count) AS comments_count,
+        MAX(ls.shares_count) AS shares_count
+      FROM live_snapshots ls
+      WHERE ls.live_id = l.id
+    ) snap ON true
+    WHERE l.tenant_id = $1
+      AND l.cliente_id = $2
+      AND l.status IN ('encerrada', 'em_andamento')
+      AND l.iniciado_em >= p.inicio
+      AND l.iniciado_em < p.fim
+    ORDER BY l.iniciado_em DESC
+  `, [tenantId, clienteId, periodo.ano, periodo.mes])
+
+  const lives = livesQ.rows.map((r) => {
+    const gmv = round2(r.total_faturamento)
+    const duracaoMin = Math.round(toNumber(r.duracao_min))
+    const duracaoHoras = round2(duracaoMin / 60)
+    const valorInvestido = round2(duracaoHoras * custoHora)
+
+    return {
+      id: r.id,
+      iniciado_em: r.iniciado_em,
+      encerrado_em: r.encerrado_em,
+      cabine_numero: r.cabine_numero == null ? null : Number(r.cabine_numero),
+      streamer_nome: r.apresentador_nome,
+      status: r.status,
+      total_faturamento: gmv,
+      gmv,
+      comissao: round2(r.comissao),
+      total_vendas: toInt(r.total_vendas),
+      itens_vendidos: toInt(r.total_vendas),
+      pedidos: toInt(r.pedidos),
+      duracao_min: duracaoMin,
+      duracao_horas: duracaoHoras,
+      viewers: toInt(r.viewers),
+      comentarios: toInt(r.comentarios),
+      likes: toInt(r.likes),
+      shares: toInt(r.shares),
+      valor_investido: valorInvestido,
+      roas: valorInvestido > 0 ? round2(gmv / valorInvestido) : 0,
+    }
+  })
+
+  const resumo = lives.reduce((acc, live) => {
+    acc.total_faturamento += live.gmv
+    acc.gmv_total += live.gmv
+    acc.total_vendas += live.total_vendas
+    acc.itens_vendidos += live.itens_vendidos
+    acc.horas_live += live.duracao_horas
+    acc.valor_investido_lives += live.valor_investido
+    acc.viewers += live.viewers
+    acc.comentarios += live.comentarios
+    acc.likes += live.likes
+    acc.shares += live.shares
+    acc.pedidos += live.pedidos
+    return acc
+  }, {
+    total_faturamento: 0,
+    gmv_total: 0,
+    total_vendas: 0,
+    itens_vendidos: 0,
+    total_lives: lives.length,
+    horas_live: 0,
+    valor_investido_lives: 0,
+    roas: 0,
+    viewers: 0,
+    comentarios: 0,
+    likes: 0,
+    shares: 0,
+    pedidos: 0,
+  })
+
+  resumo.total_faturamento = round2(resumo.total_faturamento)
+  resumo.gmv_total = round2(resumo.gmv_total)
+  resumo.horas_live = round2(resumo.horas_live)
+  resumo.valor_investido_lives = round2(resumo.valor_investido_lives)
+  resumo.roas = resumo.valor_investido_lives > 0
+    ? round2(resumo.gmv_total / resumo.valor_investido_lives)
+    : 0
+
+  return { periodo, resumo, lives }
+}
+
+const bloquearClienteCabines = async (_request, reply) => {
+  return reply.code(403).send({ error: 'Cliente parceiro não tem acesso a cabines' })
+}
+
 export async function clienteDashboardRoutes(app) {
   // GET /v1/cliente/dashboard
   app.get('/v1/cliente/dashboard', {
     preHandler: app.requirePapel(['cliente_parceiro']),
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
     const db = await app.dbTenant(tenant_id)
-    
-    try {
-      // 1. Busca cliente vinculado ao usuário (mesmo email)
-      const userQ = await db.query(`
-        SELECT email
-        FROM users
-        WHERE id = $1 AND tenant_id = $2
-      `, [user_id, tenant_id])
-      const email = userQ.rows[0]?.email
 
-      const clienteQ = await db.query(`
-        SELECT id, nicho, nome
-        FROM clientes
-        WHERE tenant_id = $1
-          AND email = $2
-          AND status = 'ativo'
-        LIMIT 1
-      `, [tenant_id, email])
-      const clienteAtual = clienteQ.rows[0]
+    try {
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
       const cliente_id = clienteAtual?.id
       const clienteNicho = clienteAtual?.nicho ?? null
 
       if (!cliente_id) {
-        return {
-          faturamento_mes: 0,
-          crescimento_pct: 0,
-          volume_vendas: 0,
-          horas_mes: 0,
-          roas_mes: null,
-          pacote: null,
-          faturamento_por_mes: [],
-          top_horarios: [],
-          top_dias_semana: [],
-          live_ativa: null,
-          mais_vendidos: [],
-          ranking_dia: null,
-          proxima_reserva: null,
-          benchmark_nicho: null,
-          benchmark_geral: null,
-        }
+        return emptyDashboard(periodo)
       }
 
-      // 2. Busca o contrato ativo + pacote vinculado
-      const contratoQ = await db.query(`
-        SELECT c.id, c.comissao_pct, c.ativado_em, c.assinado_em,
-               c.valor_fixo, c.pacote_id,
-               p.valor AS pacote_valor, p.horas_incluidas
-        FROM contratos c
-        LEFT JOIN pacotes p ON p.id = c.pacote_id
-        WHERE c.tenant_id = $1
-          AND c.cliente_id = $2
-          AND c.status = 'ativo'
-        ORDER BY c.ativado_em DESC NULLS LAST, c.criado_em DESC
-        LIMIT 1
-      `, [tenant_id, cliente_id])
-      const contratoRow = contratoQ.rows[0]
-      const comissaoPct = Number(contratoRow?.comissao_pct || 0)
-      const custoPacote = Number(contratoRow?.pacote_valor ?? contratoRow?.valor_fixo ?? 0)
-      const pacoteInfo = contratoRow ? {
-        valor: custoPacote,
-        horas_incluidas: Number(contratoRow.horas_incluidas ?? 0),
-        valor_fixo_contrato: Number(contratoRow.valor_fixo ?? 0),
-      } : null
+      const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
+      const comissaoPct = toNumber(contratoAtivo?.comissao_pct)
+      const custoHora = calcularCustoHora(contratoAtivo)
+      const livesPayload = await fetchClienteLives(db, tenant_id, cliente_id, periodo, custoHora)
+      const resumo = livesPayload.resumo
 
-      // 3. Faturamento e Horas do Mês (Apenas lives encerradas)
-      const mesQ = await db.query(`
-        SELECT
-          COALESCE(SUM(fat_gerado), 0) AS faturamento_mes,
-          COALESCE(SUM(duracao_min), 0) / 60.0 AS horas_mes
-        FROM lives
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'encerrada'
-          AND date_trunc('month', encerrado_em) = date_trunc('month', NOW())
-      `, [tenant_id, cliente_id])
-
-      const faturamentoMes = Number(mesQ.rows[0].faturamento_mes)
-      const horasMes = Number(mesQ.rows[0].horas_mes)
-      const roasMes = custoPacote > 0 ? Number((faturamentoMes / custoPacote).toFixed(2)) : null
-
-      // 4. Crescimento mês atual vs anterior (Baseado no faturamento)
       const crescQ = await db.query(`
+        WITH periodo AS (
+          SELECT make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') AS inicio
+        )
         SELECT
-          COALESCE(SUM(CASE WHEN date_trunc('month', encerrado_em) = date_trunc('month', NOW())
-                            THEN fat_gerado END), 0) AS mes_atual,
-          COALESCE(SUM(CASE WHEN date_trunc('month', encerrado_em) = date_trunc('month', NOW() - interval '1 month')
-                            THEN fat_gerado END), 0) AS mes_anterior
-        FROM lives
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'encerrada'
-      `, [tenant_id, cliente_id])
-      
+          COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio AND l.iniciado_em < p.inicio + INTERVAL '1 month'
+                            THEN l.fat_gerado END), 0) AS mes_atual,
+          COALESCE(SUM(CASE WHEN l.iniciado_em >= p.inicio - INTERVAL '1 month' AND l.iniciado_em < p.inicio
+                            THEN l.fat_gerado END), 0) AS mes_anterior
+        FROM lives l
+        CROSS JOIN periodo p
+        WHERE l.tenant_id = $1
+          AND l.cliente_id = $2
+          AND l.status IN ('encerrada', 'em_andamento')
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
       const c = crescQ.rows[0]
-      const crescimento = Number(c.mes_anterior) > 0
-        ? Math.round(((Number(c.mes_atual) - Number(c.mes_anterior)) / Number(c.mes_anterior)) * 100)
+      const crescimento = toNumber(c?.mes_anterior) > 0
+        ? Math.round(((toNumber(c.mes_atual) - toNumber(c.mes_anterior)) / toNumber(c.mes_anterior)) * 100)
         : 0
 
-      // 5a. Faturamento por mês (últimos 12 meses)
-      const fatMensalQ = await db.query(`
-        SELECT
-          to_char(date_trunc('month', encerrado_em), 'YYYY-MM') AS mes,
-          COALESCE(SUM(fat_gerado), 0) AS gmv
-        FROM lives
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'encerrada'
-          AND encerrado_em >= NOW() - interval '12 months'
-        GROUP BY date_trunc('month', encerrado_em)
-        ORDER BY mes ASC
-      `, [tenant_id, cliente_id])
-      const faturamentoPorMes = fatMensalQ.rows.map(r => ({ mes: r.mes, gmv: Number(r.gmv) }))
-
-      // 5b. Top horários (últimos 90 dias)
-      const topHorariosQ = await db.query(`
-        SELECT
-          EXTRACT(HOUR FROM iniciado_em)::int AS hora,
-          COALESCE(SUM(fat_gerado), 0) AS gmv_total,
-          COUNT(*)::int AS total_lives
-        FROM lives
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'encerrada'
-          AND iniciado_em >= CURRENT_DATE - interval '90 days'
-        GROUP BY hora
-        ORDER BY hora
-      `, [tenant_id, cliente_id])
-      const topHorarios = topHorariosQ.rows.map(r => ({
-        hora: r.hora, gmv_total: Number(r.gmv_total), total_lives: r.total_lives,
-      }))
-
-      // 5c. Top dias da semana (0=Dom..6=Sab, últimos 90 dias)
-      const topDiasQ = await db.query(`
-        SELECT
-          EXTRACT(DOW FROM iniciado_em)::int AS dia_semana,
-          COALESCE(SUM(fat_gerado), 0) AS gmv_total,
-          COUNT(*)::int AS total_lives
-        FROM lives
-        WHERE tenant_id = $1
-          AND cliente_id = $2
-          AND status = 'encerrada'
-          AND iniciado_em >= CURRENT_DATE - interval '90 days'
-        GROUP BY dia_semana
-        ORDER BY dia_semana
-      `, [tenant_id, cliente_id])
-      const topDiasSemana = topDiasQ.rows.map(r => ({
-        dia_semana: r.dia_semana, gmv_total: Number(r.gmv_total), total_lives: r.total_lives,
-      }))
-
-      // 6. Verifica se há uma Live Ativa agora e pega os dados do TikTok (Snapshots)
       const liveQ = await db.query(`
-        SELECT 
-          l.id, l.iniciado_em,
+        SELECT
+          l.id,
+          l.iniciado_em,
           c.numero AS cabine_numero,
           COALESCE(ls.viewer_count, 0) AS viewer_count,
-          COALESCE(ls.gmv, 0) AS gmv_atual
-        FROM lives l 
+          COALESCE(ls.gmv, 0) AS gmv_atual,
+          COALESCE(ls.total_orders, 0) AS pedidos,
+          COALESCE(ls.likes_count, 0) AS likes,
+          COALESCE(ls.comments_count, 0) AS comentarios,
+          COALESCE(ls.shares_count, 0) AS shares
+        FROM lives l
         JOIN cabines c ON c.id = l.cabine_id
         LEFT JOIN LATERAL (
-          SELECT viewer_count, gmv 
-          FROM live_snapshots 
-          WHERE live_id = l.id 
-          ORDER BY captured_at DESC LIMIT 1
+          SELECT viewer_count, gmv, total_orders, likes_count, comments_count, shares_count
+          FROM live_snapshots
+          WHERE live_id = l.id
+          ORDER BY captured_at DESC
+          LIMIT 1
         ) ls ON true
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
           AND l.status = 'em_andamento'
         LIMIT 1
       `, [tenant_id, cliente_id])
-      
+
       const liveRow = liveQ.rows[0]
       let liveAtiva = null
 
       if (liveRow) {
         const iniciadoEm = new Date(liveRow.iniciado_em)
         const duracaoMin = Math.floor((new Date() - iniciadoEm) / 1000 / 60)
-        const gmvAtual = Number(liveRow.gmv_atual)
-        
+        const gmvAtual = round2(liveRow.gmv_atual)
+
         liveAtiva = {
           cabine_numero: liveRow.cabine_numero,
-          viewer_count: Number(liveRow.viewer_count),
+          viewer_count: toInt(liveRow.viewer_count),
           gmv_atual: gmvAtual,
-          comissao_projetada: gmvAtual * (comissaoPct / 100),
+          comissao_projetada: round2(gmvAtual * (comissaoPct / 100)),
           duracao_min: duracaoMin,
-          iniciou_em: iniciadoEm.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+          iniciou_em: iniciadoEm.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }),
+          pedidos: toInt(liveRow.pedidos),
+          likes: toInt(liveRow.likes),
+          comentarios: toInt(liveRow.comentarios),
+          shares: toInt(liveRow.shares),
         }
       }
 
-      // 7. Produtos Mais Vendidos do Mês (Agrupado por nome)
       const produtosQ = await db.query(`
-        SELECT 
-          lp.produto_nome AS produto, 
-          SUM(lp.quantidade) AS qty, 
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') + INTERVAL '1 month' AS fim
+        )
+        SELECT
+          lp.produto_nome AS produto,
+          SUM(lp.quantidade) AS qty,
           SUM(lp.valor_total) AS valor
         FROM live_products lp
         JOIN lives l ON l.id = lp.live_id
+        CROSS JOIN periodo p
         WHERE l.tenant_id = $1
           AND l.cliente_id = $2
-          AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+          AND l.iniciado_em >= p.inicio
+          AND l.iniciado_em < p.fim
         GROUP BY lp.produto_nome
-        ORDER BY qty DESC
+        ORDER BY qty DESC, valor DESC
         LIMIT 5
-      `, [tenant_id, cliente_id])
-      
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
       const maisVendidos = produtosQ.rows.map(p => ({
         produto: p.produto,
-        qty: Number(p.qty),
-        valor: Number(p.valor)
+        qty: toInt(p.qty),
+        valor: round2(p.valor),
       }))
 
-      // Calcula volume total de vendas de itens do mês
-      const volumeVendas = maisVendidos.reduce((acc, curr) => acc + curr.qty, 0)
-
-      // 8. Ranking do Dia
       const rankQ = await db.query(`
-        SELECT cliente_id, SUM(fat_gerado) AS total,
-               RANK() OVER (ORDER BY SUM(fat_gerado) DESC) AS posicao,
-               COUNT(*) OVER() as total_participantes
-        FROM lives
-        WHERE tenant_id = $1
-          AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
-        GROUP BY cliente_id
-      `, [tenant_id])
-      
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($2::int, $3::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') AS inicio,
+            make_timestamptz($2::int, $3::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') + INTERVAL '1 month' AS fim
+        ), ranked AS (
+          SELECT
+            l.cliente_id,
+            SUM(l.fat_gerado) AS total,
+            RANK() OVER (ORDER BY SUM(l.fat_gerado) DESC) AS posicao,
+            COUNT(*) OVER() AS total_participantes
+          FROM lives l
+          CROSS JOIN periodo p
+          WHERE l.tenant_id = $1
+            AND l.status IN ('encerrada', 'em_andamento')
+            AND l.iniciado_em >= p.inicio
+            AND l.iniciado_em < p.fim
+          GROUP BY l.cliente_id
+        )
+        SELECT * FROM ranked
+      `, [tenant_id, periodo.ano, periodo.mes])
+
       const minhaPosicao = rankQ.rows.find(r => r.cliente_id === cliente_id)
-      let rankingDia = null
-      
-      if (minhaPosicao) {
-        rankingDia = {
-          posicao: Number(minhaPosicao.posicao),
-          gmv_dia: Number(minhaPosicao.total),
-          total_participantes: Number(minhaPosicao.total_participantes)
-        }
-      }
-
-      // 9. Próxima reserva operacional (cabine já vinculada para próxima operação)
-      const proximaReservaQ = await db.query(`
-        SELECT
-          c.id AS cabine_id,
-          c.numero AS cabine_numero,
-          c.status,
-          c.contrato_id,
-          ct.ativado_em,
-          ct.assinado_em
-        FROM cabines c
-        JOIN contratos ct ON ct.id = c.contrato_id
-        WHERE ct.tenant_id = $1
-          AND ct.cliente_id = $2
-          AND c.status IN ('reservada', 'ativa')
-        ORDER BY CASE c.status WHEN 'reservada' THEN 0 ELSE 1 END, c.numero ASC
-        LIMIT 1
-      `, [tenant_id, cliente_id])
-
-      const proximaReserva = proximaReservaQ.rows[0]
+      const rankingPeriodo = minhaPosicao
         ? {
-            cabine_id: proximaReservaQ.rows[0].cabine_id,
-            cabine_numero: Number(proximaReservaQ.rows[0].cabine_numero),
-            status: proximaReservaQ.rows[0].status,
-            contrato_id: proximaReservaQ.rows[0].contrato_id,
-            ativado_em: proximaReservaQ.rows[0].ativado_em,
-            assinado_em: proximaReservaQ.rows[0].assinado_em,
+            posicao: toInt(minhaPosicao.posicao),
+            gmv_periodo: round2(minhaPosicao.total),
+            gmv_dia: round2(minhaPosicao.total),
+            total_participantes: toInt(minhaPosicao.total_participantes),
           }
         : null
 
-      // 10. Benchmark anônimo do ecossistema (últimos 90 dias)
       const benchmarkQ = await db.query(`
         WITH base_90_dias AS (
           SELECT
@@ -336,37 +503,6 @@ export async function clienteDashboardRoutes(app) {
 
       const benchmark = benchmarkQ.rows[0] ?? {}
 
-      const buildBenchmark = ({
-        niche,
-        meuGmv,
-        mediaGmv,
-        amostra,
-        percentil,
-        minimumSample,
-      }) => {
-        const media = Number(mediaGmv ?? 0)
-        const sampleSize = Number(amostra ?? 0)
-
-        if (sampleSize < minimumSample) {
-          return null
-        }
-
-        const meu = Number(meuGmv ?? 0)
-        const percentualDaMedia = media > 0
-          ? Number(((meu / media) * 100).toFixed(1))
-          : 0
-
-        return {
-          nicho: niche,
-          meu_gmv: meu,
-          media_gmv: Number(media.toFixed(2)),
-          percentual_da_media: percentualDaMedia,
-          percentil: percentil == null ? null : Number(Number(percentil).toFixed(2)),
-          amostra: sampleSize,
-          acima_da_media: meu > media,
-        }
-      }
-
       const benchmarkNicho = clienteNicho == null
         ? null
         : buildBenchmark({
@@ -384,25 +520,155 @@ export async function clienteDashboardRoutes(app) {
         mediaGmv: benchmark.media_gmv_geral,
         amostra: benchmark.amostra_geral,
         percentil: benchmark.percentil_geral,
-        minimumSample: 10,
+          minimumSample: 10,
+        })
+
+      const horariosQ = await db.query(`
+        WITH periodo AS (
+          SELECT
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') AS inicio,
+            make_timestamptz($3::int, $4::int, 1, 0, 0, 0, '${DASHBOARD_TZ}') + INTERVAL '1 month' AS fim
+        ), snapshots AS (
+          SELECT
+            ls.live_id,
+            ls.captured_at,
+            COALESCE(ls.gmv, 0) AS gmv,
+            COALESCE(ls.total_orders, 0) AS total_orders,
+            LAG(COALESCE(ls.gmv, 0)) OVER (PARTITION BY ls.live_id ORDER BY ls.captured_at) AS prev_gmv,
+            LAG(COALESCE(ls.total_orders, 0)) OVER (PARTITION BY ls.live_id ORDER BY ls.captured_at) AS prev_orders
+          FROM lives l
+          JOIN live_snapshots ls ON ls.live_id = l.id
+          CROSS JOIN periodo p
+          WHERE l.tenant_id = $1
+            AND l.cliente_id = $2
+            AND l.status IN ('encerrada', 'em_andamento')
+            AND l.iniciado_em >= p.inicio
+            AND l.iniciado_em < p.fim
+        ), deltas AS (
+          SELECT
+            live_id,
+            EXTRACT(HOUR FROM timezone('${DASHBOARD_TZ}', captured_at))::int AS hora,
+            GREATEST(gmv - COALESCE(prev_gmv, 0), 0) AS gmv_delta,
+            GREATEST(total_orders - COALESCE(prev_orders, 0), 0) AS pedidos_delta
+          FROM snapshots
+        ), snapshot_hours AS (
+          SELECT
+            hora,
+            COUNT(DISTINCT live_id) AS total_lives,
+            SUM(gmv_delta) AS gmv_total,
+            SUM(pedidos_delta) AS pedidos
+          FROM deltas
+          GROUP BY hora
+          HAVING SUM(gmv_delta) > 0
+        ), fallback_hours AS (
+          SELECT
+            EXTRACT(HOUR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int AS hora,
+            COUNT(l.id) AS total_lives,
+            COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
+            COALESCE(SUM(prod.itens), 0) AS pedidos
+          FROM lives l
+          CROSS JOIN periodo p
+          LEFT JOIN LATERAL (
+            SELECT SUM(lp.quantidade) AS itens
+            FROM live_products lp
+            WHERE lp.live_id = l.id
+          ) prod ON true
+          WHERE l.tenant_id = $1
+            AND l.cliente_id = $2
+            AND l.status IN ('encerrada', 'em_andamento')
+            AND l.iniciado_em >= p.inicio
+            AND l.iniciado_em < p.fim
+            AND NOT EXISTS (SELECT 1 FROM snapshot_hours)
+          GROUP BY hora
+        )
+        SELECT hora, total_lives, gmv_total, pedidos
+        FROM snapshot_hours
+        UNION ALL
+        SELECT hora, total_lives, gmv_total, pedidos
+        FROM fallback_hours
+        ORDER BY gmv_total DESC, hora ASC
+        LIMIT 6
+      `, [tenant_id, cliente_id, periodo.ano, periodo.mes])
+
+      const melhoresHorariosVenda = horariosQ.rows.map((r) => ({
+        hora: toInt(r.hora),
+        label: `${toInt(r.hora).toString().padStart(2, '0')}h`,
+        total_lives: toInt(r.total_lives),
+        gmv_total: round2(r.gmv_total),
+        pedidos: toInt(r.pedidos),
+      }))
+
+      const seriesQ = await db.query(`
+        WITH meses AS (
+          SELECT generate_series(1, 12) AS mes
+        )
+        SELECT
+          m.mes,
+          COUNT(l.id) AS total_lives,
+          COALESCE(SUM(l.fat_gerado), 0) AS gmv_total,
+          COALESCE(SUM(prod.itens), 0) AS itens_vendidos,
+          COALESCE(SUM(GREATEST(EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 3600, 0)), 0) AS horas_live
+        FROM meses m
+        LEFT JOIN lives l
+          ON l.tenant_id = $1
+         AND l.cliente_id = $2
+         AND l.status IN ('encerrada', 'em_andamento')
+         AND EXTRACT(YEAR FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = $3
+         AND EXTRACT(MONTH FROM timezone('${DASHBOARD_TZ}', l.iniciado_em))::int = m.mes
+        LEFT JOIN LATERAL (
+          SELECT SUM(lp.quantidade) AS itens
+          FROM live_products lp
+          WHERE lp.live_id = l.id
+        ) prod ON true
+        GROUP BY m.mes
+        ORDER BY m.mes
+      `, [tenant_id, cliente_id, periodo.ano])
+
+      const seriesMensais = seriesQ.rows.map((r) => {
+        const horasLive = round2(r.horas_live)
+        const valorInvestido = round2(horasLive * custoHora)
+        const gmvTotal = round2(r.gmv_total)
+
+        return {
+          mes: toInt(r.mes),
+          ano: periodo.ano,
+          total_lives: toInt(r.total_lives),
+          gmv_total: gmvTotal,
+          itens_vendidos: toInt(r.itens_vendidos),
+          horas_live: horasLive,
+          valor_investido_lives: valorInvestido,
+          roas: valorInvestido > 0 ? round2(gmvTotal / valorInvestido) : 0,
+        }
       })
 
       return {
-        faturamento_mes:    faturamentoMes,
-        crescimento_pct:    crescimento,
-        volume_vendas:      volumeVendas,
-        horas_mes:          Number(horasMes.toFixed(1)),
-        roas_mes:           roasMes,
-        pacote:             pacoteInfo,
-        faturamento_por_mes: faturamentoPorMes,
-        top_horarios:       topHorarios,
-        top_dias_semana:    topDiasSemana,
-        live_ativa:         liveAtiva,
-        mais_vendidos:      maisVendidos,
-        ranking_dia:        rankingDia,
-        proxima_reserva:    proximaReserva,
-        benchmark_nicho:    benchmarkNicho,
-        benchmark_geral:    benchmarkGeral,
+        periodo,
+        faturamento_mes: resumo.gmv_total,
+        gmv_mes: resumo.gmv_total,
+        crescimento_pct: crescimento,
+        volume_vendas:   resumo.itens_vendidos,
+        itens_vendidos:  resumo.itens_vendidos,
+        lucro_estimado:  round2(livesPayload.lives.reduce((sum, live) => sum + live.comissao, 0)),
+        horas_live_mes:  resumo.horas_live,
+        horas_live:      resumo.horas_live,
+        valor_investido_lives: resumo.valor_investido_lives,
+        roas:            resumo.roas,
+        viewers:         resumo.viewers,
+        comentarios:     resumo.comentarios,
+        likes:           resumo.likes,
+        shares:          resumo.shares,
+        pedidos:         resumo.pedidos,
+        total_lives:     resumo.total_lives,
+        live_ativa:      liveAtiva,
+        mais_vendidos:   maisVendidos,
+        ranking_dia:     rankingPeriodo,
+        ranking_periodo: rankingPeriodo,
+        proxima_reserva: null,
+        benchmark_nicho: benchmarkNicho,
+        benchmark_geral: benchmarkGeral,
+        melhores_horarios_venda: melhoresHorariosVenda,
+        series_mensais: seriesMensais,
+        lives: livesPayload.lives,
       }
 
     } catch (e) {
@@ -413,155 +679,43 @@ export async function clienteDashboardRoutes(app) {
     }
   })
 
-  // GET /v1/cliente/lives — lives detalhadas com métricas de engajamento por mês
-  app.get('/v1/cliente/lives', {
-    preHandler: app.requirePapel(['cliente_parceiro']),
-  }, async (request) => {
-    const { sub: user_id, tenant_id } = request.user
-    const db = await app.dbTenant(tenant_id)
-
-    try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
-
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
-      if (!cliente_id) return { lives: [] }
-
-      const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
-      const ano = Number(request.query.ano) || new Date().getFullYear()
-
-      const livesQ = await db.query(`
-        SELECT
-          l.id, l.iniciado_em, l.encerrado_em,
-          c.numero AS cabine_numero,
-          EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60 AS duracao_min,
-          COALESCE(snap.viewer_count, 0)   AS viewer_count,
-          COALESCE(snap.comments_count, 0) AS comments_count,
-          COALESCE(snap.likes_count, 0)    AS likes_count,
-          COALESCE(snap.shares_count, 0)   AS shares_count,
-          COALESCE(snap.total_orders, 0)   AS total_orders,
-          COALESCE(l.fat_gerado, 0)        AS fat_gerado,
-          (
-            SELECT lp.produto_nome
-            FROM live_products lp
-            WHERE lp.live_id = l.id
-            GROUP BY lp.produto_nome
-            ORDER BY SUM(lp.quantidade) DESC
-            LIMIT 1
-          ) AS top_produto
-        FROM lives l
-        JOIN cabines c ON c.id = l.cabine_id
-        LEFT JOIN LATERAL (
-          SELECT viewer_count, comments_count, likes_count, shares_count, total_orders
-          FROM live_snapshots
-          WHERE live_id = l.id
-          ORDER BY captured_at DESC
-          LIMIT 1
-        ) snap ON true
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND EXTRACT(MONTH FROM l.iniciado_em) = $3
-          AND EXTRACT(YEAR FROM l.iniciado_em) = $4
-          AND l.status IN ('encerrada', 'em_andamento')
-        ORDER BY l.iniciado_em DESC
-      `, [tenant_id, cliente_id, mes, ano])
-
-      return {
-        lives: livesQ.rows.map(r => ({
-          id:              r.id,
-          iniciado_em:     r.iniciado_em,
-          encerrado_em:    r.encerrado_em,
-          cabine_numero:   Number(r.cabine_numero),
-          duracao_min:     Math.round(Number(r.duracao_min)),
-          viewer_count:    Number(r.viewer_count),
-          comments_count:  Number(r.comments_count),
-          likes_count:     Number(r.likes_count),
-          shares_count:    Number(r.shares_count),
-          total_orders:    Number(r.total_orders),
-          fat_gerado:      Number(r.fat_gerado),
-          top_produto:     r.top_produto ?? null,
-        })),
-      }
-    } finally {
-      db.release()
-    }
-  })
-
   // GET /v1/cliente/vendas — histórico de lives do cliente por mês
   app.get('/v1/cliente/vendas', {
     preHandler: app.requirePapel(['cliente_parceiro']),
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
     const db = await app.dbTenant(tenant_id)
 
     try {
-      const userQ = await db.query(
-        `SELECT email FROM users WHERE id = $1 AND tenant_id = $2`,
-        [user_id, tenant_id]
-      )
-      const email = userQ.rows[0]?.email
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
+      const cliente_id = clienteAtual?.id
+      if (!cliente_id) return emptyLivesPayload(periodo)
 
-      const clienteQ = await db.query(
-        `SELECT id FROM clientes WHERE tenant_id = $1 AND email = $2 AND status = 'ativo' LIMIT 1`,
-        [tenant_id, email]
-      )
-      const cliente_id = clienteQ.rows[0]?.id
-      if (!cliente_id) return { resumo: { total_faturamento: 0, total_vendas: 0, total_lives: 0 }, lives: [] }
+      const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
+      const custoHora = calcularCustoHora(contratoAtivo)
+      return fetchClienteLives(db, tenant_id, cliente_id, periodo, custoHora)
+    } finally {
+      db.release()
+    }
+  })
 
-      const mes = Number(request.query.mes) || (new Date().getMonth() + 1)
-      const ano = Number(request.query.ano) || new Date().getFullYear()
+  // GET /v1/cliente/lives — histórico detalhado de lives do cliente por mês
+  app.get('/v1/cliente/lives', {
+    preHandler: app.requirePapel(['cliente_parceiro']),
+  }, async (request) => {
+    const { sub: user_id, tenant_id } = request.user
+    const periodo = parsePeriodo(request.query)
+    const db = await app.dbTenant(tenant_id)
 
-      const livesQ = await db.query(`
-        SELECT
-          l.id, l.iniciado_em, l.encerrado_em,
-          c.numero AS cabine_numero,
-          u.nome AS apresentador_nome,
-          l.status,
-          COALESCE(l.fat_gerado, 0) AS total_faturamento,
-          COALESCE(l.comissao_calculada, 0) AS comissao,
-          COALESCE(
-            (SELECT SUM(lp.quantidade) FROM live_products lp WHERE lp.live_id = l.id), 0
-          ) AS total_vendas,
-          EXTRACT(EPOCH FROM (COALESCE(l.encerrado_em, NOW()) - l.iniciado_em)) / 60 AS duracao_min
-        FROM lives l
-        LEFT JOIN cabines c ON c.id = l.cabine_id
-        LEFT JOIN users u ON u.id = l.apresentador_id
-        WHERE l.tenant_id = $1
-          AND l.cliente_id = $2
-          AND EXTRACT(MONTH FROM l.iniciado_em) = $3
-          AND EXTRACT(YEAR FROM l.iniciado_em) = $4
-          AND l.status IN ('encerrada', 'em_andamento')
-        ORDER BY l.iniciado_em DESC
-      `, [tenant_id, cliente_id, mes, ano])
+    try {
+      const clienteAtual = await getClienteVinculado(db, tenant_id, user_id)
+      const cliente_id = clienteAtual?.id
+      if (!cliente_id) return emptyLivesPayload(periodo)
 
-      const lives = livesQ.rows.map(r => ({
-        id: r.id,
-        iniciado_em: r.iniciado_em,
-        encerrado_em: r.encerrado_em,
-        cabine_numero: Number(r.cabine_numero),
-        streamer_nome: r.apresentador_nome,
-        status: r.status,
-        total_faturamento: Number(r.total_faturamento),
-        comissao: Number(r.comissao),
-        total_vendas: Number(r.total_vendas),
-        duracao_min: Math.round(Number(r.duracao_min)),
-      }))
-
-      return {
-        resumo: {
-          total_faturamento: lives.reduce((s, l) => s + l.total_faturamento, 0),
-          total_vendas: lives.reduce((s, l) => s + l.total_vendas, 0),
-          total_lives: lives.length,
-        },
-        lives,
-      }
+      const contratoAtivo = await getContratoAtivo(db, tenant_id, cliente_id)
+      const custoHora = calcularCustoHora(contratoAtivo)
+      return fetchClienteLives(db, tenant_id, cliente_id, periodo, custoHora)
     } finally {
       db.release()
     }
@@ -632,7 +786,7 @@ export async function clienteDashboardRoutes(app) {
 
   // GET /v1/cliente/cabines — lista cabines vinculadas ao cliente via contratos ativos
   app.get('/v1/cliente/cabines', {
-    preHandler: app.requirePapel(['cliente_parceiro']),
+    preHandler: [app.requirePapel(['cliente_parceiro']), bloquearClienteCabines],
   }, async (request) => {
     const { sub: user_id, tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
@@ -702,7 +856,7 @@ export async function clienteDashboardRoutes(app) {
 
   // GET /v1/cliente/cabines/:cabineId — detalhe da cabine + live atual + histórico
   app.get('/v1/cliente/cabines/:cabineId', {
-    preHandler: app.requirePapel(['cliente_parceiro']),
+    preHandler: [app.requirePapel(['cliente_parceiro']), bloquearClienteCabines],
   }, async (request, reply) => {
     const { sub: user_id, tenant_id } = request.user
     const { cabineId } = request.params
@@ -835,7 +989,7 @@ export async function clienteDashboardRoutes(app) {
 
   // GET /v1/cliente/cabines/:cabineId/solicitacoes — minhas solicitações desta cabine
   app.get('/v1/cliente/cabines/:cabineId/solicitacoes', {
-    preHandler: app.requirePapel(['cliente_parceiro']),
+    preHandler: [app.requirePapel(['cliente_parceiro']), bloquearClienteCabines],
   }, async (request, reply) => {
     const { sub: user_id, tenant_id } = request.user
     const { cabineId } = request.params
@@ -883,7 +1037,7 @@ export async function clienteDashboardRoutes(app) {
 
   // POST /v1/cliente/cabines/:cabineId/solicitar-live — criar solicitação de live
   app.post('/v1/cliente/cabines/:cabineId/solicitar-live', {
-    preHandler: app.requirePapel(['cliente_parceiro']),
+    preHandler: [app.requirePapel(['cliente_parceiro']), bloquearClienteCabines],
   }, async (request, reply) => {
     const { sub: user_id, tenant_id } = request.user
     const { cabineId } = request.params

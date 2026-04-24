@@ -62,10 +62,25 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/aprovar — aprovar solicitação com check de overlap
   app.patch('/v1/solicitacoes/:id/aprovar', {
+    schema: {
+      body: {
+        type: 'object',
+        additionalProperties: false,
+      },
+    },
     preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
     const { id } = request.params
+    request.log.info(
+      {
+        id,
+        tenant_id,
+        body: request.body,
+        content_type: request.headers['content-type'],
+      },
+      'aprovar solicitacao'
+    )
 
     // Usar pool direto para transação com FOR UPDATE
     const client = await app.db.pool.connect()

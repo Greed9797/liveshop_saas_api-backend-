@@ -2,9 +2,13 @@ import crypto from 'node:crypto'
 import { validarWebhookToken } from '../services/asaas.js'
 
 export async function boletosRoutes(app) {
+  const boletoAccess = [
+    app.authenticate,
+    app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'cliente_parceiro']),
+  ]
   
   // GET /v1/boletos/alertas
-  app.get('/v1/boletos/alertas', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/boletos/alertas', { preHandler: boletoAccess }, async (request) => {
     const { tenant_id, sub: user_id, papel } = request.user
     const db = await app.dbTenant(tenant_id)
     
@@ -50,7 +54,7 @@ export async function boletosRoutes(app) {
   })
 
   // PATCH /v1/boletos/:id/visto
-  app.patch('/v1/boletos/:id/visto', { preHandler: app.authenticate }, async (request, reply) => {
+  app.patch('/v1/boletos/:id/visto', { preHandler: boletoAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     
@@ -66,7 +70,7 @@ export async function boletosRoutes(app) {
     }
   })
 // GET /v1/boletos
-  app.get('/v1/boletos', { preHandler: app.authenticate }, async (request) => {
+  app.get('/v1/boletos', { preHandler: boletoAccess }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -82,7 +86,7 @@ export async function boletosRoutes(app) {
   })
 
   // GET /v1/boletos/:id
-  app.get('/v1/boletos/:id', { preHandler: app.authenticate }, async (request, reply) => {
+  app.get('/v1/boletos/:id', { preHandler: boletoAccess }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {
@@ -97,7 +101,7 @@ export async function boletosRoutes(app) {
   })
 
   // PATCH /v1/boletos/:id/pagar (dev manual)
-  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.patch('/v1/boletos/:id/pagar', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
     try {

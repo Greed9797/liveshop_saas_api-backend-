@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "nodemon --watch src src/server.js",
     "start": "node src/server.js",
-    "test": "vitest run",
+    "test": "vitest run test/*.test.js",
     "test:watch": "vitest",
     "e2e": "playwright test --config=e2e/playwright.config.js",
     "e2e:ui": "playwright test --config=e2e/playwright.config.js --ui"

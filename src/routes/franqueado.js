@@ -1,38 +1,888 @@
-/**
- * Rotas do painel master do franqueador
- * GET /v1/franqueado/unidades — lista sub-unidades com métricas consolidadas
- */
+const MASTER_PIPELINE_STAGES = [
+  'Lead captado',
+  'Qualificação',
+  'Reunião agendada',
+  'Negociação',
+  'Contrato enviado',
+  'Contrato pendente',
+  'Fechado ganho',
+  'Fechado perdido',
+]
+
+const MONTH_LABELS = [
+  'Jan',
+  'Fev',
+  'Mar',
+  'Abr',
+  'Mai',
+  'Jun',
+  'Jul',
+  'Ago',
+  'Set',
+  'Out',
+  'Nov',
+  'Dez',
+]
+
+function toMoney(value) {
+  return Number(Number(value ?? 0).toFixed(2))
+}
+
+function toInt(value) {
+  return Number.parseInt(String(value ?? 0), 10) || 0
+}
+
+function shiftPeriod(period, delta) {
+  const [year, month] = period.split('-').map(Number)
+  const date = new Date(Date.UTC(year, month - 1 + delta, 1))
+  const shiftedYear = date.getUTCFullYear()
+  const shiftedMonth = String(date.getUTCMonth() + 1).padStart(2, '0')
+  return `${shiftedYear}-${shiftedMonth}`
+}
+
+function periodStart(period) {
+  return `${period}-01`
+}
+
+function formatPeriodLabel(period) {
+  const [year, month] = period.split('-').map(Number)
+  return `${MONTH_LABELS[month - 1]}/${String(year).slice(-2)}`
+}
+
+function listPeriods(period, count) {
+  return Array.from({ length: count }, (_, index) =>
+    shiftPeriod(period, index - (count - 1))
+  )
+}
+
+function parsePeriod(rawPeriod) {
+  const period =
+    typeof rawPeriod === 'string' && /^\d{4}-\d{2}$/.test(rawPeriod)
+      ? rawPeriod
+      : new Date().toISOString().slice(0, 7)
+
+  const previousPeriod = shiftPeriod(period, -1)
+  const nextPeriod = shiftPeriod(period, 1)
+  const historyPeriods = listPeriods(period, 6)
+
+  return {
+    period,
+    previousPeriod,
+    currentStart: periodStart(period),
+    currentEnd: periodStart(nextPeriod),
+    previousStart: periodStart(previousPeriod),
+    previousEnd: periodStart(period),
+    historyPeriods,
+    historyStart: periodStart(historyPeriods[0]),
+    historyEnd: periodStart(nextPeriod),
+  }
+}
+
+function calculateGrowth(currentValue, previousValue) {
+  const current = Number(currentValue ?? 0)
+  const previous = Number(previousValue ?? 0)
+
+  if (previous > 0) {
+    return Number((((current - previous) / previous) * 100).toFixed(1))
+  }
+
+  if (current > 0) {
+    return 100
+  }
+
+  return 0
+}
+
+function calculateRate(numerator, denominator) {
+  const top = Number(numerator ?? 0)
+  const base = Number(denominator ?? 0)
+
+  if (base <= 0) {
+    return 0
+  }
+
+  return Number(((top / base) * 100).toFixed(1))
+}
+
+function normalizeStatus(rawStatus) {
+  const allowed = new Set(['todos', 'ativo', 'inadimplente', 'pendente', 'inativo'])
+  return allowed.has(rawStatus) ? rawStatus : 'todos'
+}
+
+function formatCurrency(value) {
+  return new Intl.NumberFormat('pt-BR', {
+    style: 'currency',
+    currency: 'BRL',
+  }).format(Number(value ?? 0))
+}
+
+function pluralize(count, singular, plural) {
+  return `${count} ${count === 1 ? singular : plural}`
+}
+
+function labelContractStatus(status) {
+  switch (status) {
+    case 'rascunho':
+      return 'rascunho'
+    case 'enviado':
+      return 'enviado'
+    case 'em_analise':
+      return 'análise'
+    case 'ativo':
+      return 'ativo'
+    case 'cancelado':
+      return 'cancelado'
+    default:
+      return status ?? 'desconhecido'
+  }
+}
+
+function deriveUnitStatus(row) {
+  if (!row.is_active_tenant) return 'inativo'
+  if (row.franchisor_overdue > 0) return 'inadimplente'
+  if (row.gross_revenue <= 0) return 'pendente'
+  return 'ativo'
+}
+
+function buildExecutiveSummary(cards, alertCount) {
+  return `Tenho ${pluralize(cards.unidades_ativas, 'unidade', 'unidades')}, ${pluralize(cards.clientes_ativos, 'cliente', 'clientes')}, ${formatCurrency(cards.faturamento_bruto_rede)} faturados na rede, minha receita líquida é ${formatCurrency(cards.receita_liquida_franqueadora)}, há ${pluralize(cards.contratos_pendentes, 'contrato pendente', 'contratos pendentes')} e ${pluralize(alertCount, 'alerta crítico', 'alertas críticos')}.`
+}
+
+async function fetchUnitSummaries(app, masterTenantId, periodInfo, status = 'todos') {
+  const result = await app.db.query(
+    `
+      WITH clientes_ativos AS (
+        SELECT
+          tenant_id,
+          COUNT(*) FILTER (WHERE status = 'ativo') AS active_clients
+        FROM clientes
+        GROUP BY tenant_id
+      ),
+      contratos_resumo AS (
+        SELECT
+          tenant_id,
+          COUNT(*) FILTER (WHERE status = 'ativo') AS active_contracts,
+          COUNT(*) FILTER (WHERE status IN ('rascunho', 'enviado', 'em_analise')) AS pending_contracts,
+          COALESCE(AVG(comissao_pct) FILTER (WHERE status = 'ativo'), 0) AS avg_contract_pct,
+          COALESCE(SUM(valor_fixo) FILTER (
+            WHERE COALESCE(ativado_em, assinado_em, criado_em) < $4::date
+              AND (cancelado_em IS NULL OR cancelado_em >= $2::date)
+              AND status != 'rascunho'
+          ), 0) AS fixed_current,
+          COALESCE(SUM(valor_fixo) FILTER (
+            WHERE COALESCE(ativado_em, assinado_em, criado_em) < $5::date
+              AND (cancelado_em IS NULL OR cancelado_em >= $3::date)
+              AND status != 'rascunho'
+          ), 0) AS fixed_previous
+        FROM contratos
+        GROUP BY tenant_id
+      ),
+      lives_current AS (
+        SELECT
+          l.tenant_id,
+          COALESCE(SUM(l.fat_gerado), 0) AS gmv_current,
+          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_current
+        FROM lives l
+        LEFT JOIN LATERAL (
+          SELECT c.comissao_pct
+          FROM contratos c
+          WHERE c.tenant_id = l.tenant_id
+            AND c.cliente_id = l.cliente_id
+          ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
+          LIMIT 1
+        ) ct ON TRUE
+        WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+          AND COALESCE(l.encerrado_em, l.iniciado_em) < $4::date
+        GROUP BY l.tenant_id
+      ),
+      lives_previous AS (
+        SELECT
+          l.tenant_id,
+          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_previous
+        FROM lives l
+        LEFT JOIN LATERAL (
+          SELECT c.comissao_pct
+          FROM contratos c
+          WHERE c.tenant_id = l.tenant_id
+            AND c.cliente_id = l.cliente_id
+          ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
+          LIMIT 1
+        ) ct ON TRUE
+        WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $3::date
+          AND COALESCE(l.encerrado_em, l.iniciado_em) < $5::date
+        GROUP BY l.tenant_id
+      ),
+      boletos_current AS (
+        SELECT
+          tenant_id,
+          COALESCE(SUM(valor), 0) AS franchisor_current,
+          COALESCE(SUM(valor) FILTER (WHERE status = 'pago'), 0) AS franchisor_received,
+          COALESCE(SUM(valor) FILTER (
+            WHERE status = 'vencido'
+               OR (status = 'pendente' AND vencimento < CURRENT_DATE)
+          ), 0) AS franchisor_overdue,
+          COALESCE(SUM(valor) FILTER (
+            WHERE status = 'pendente' AND vencimento >= CURRENT_DATE
+          ), 0) AS franchisor_pending
+        FROM boletos
+        WHERE competencia >= $2::date
+          AND competencia < $4::date
+        GROUP BY tenant_id
+      )
+      SELECT
+        t.id,
+        t.nome,
+        t.ativo,
+        COALESCE(ca.active_clients, 0) AS active_clients,
+        COALESCE(cr.active_contracts, 0) AS active_contracts,
+        COALESCE(cr.pending_contracts, 0) AS pending_contracts,
+        COALESCE(cr.avg_contract_pct, 0) AS avg_contract_pct,
+        COALESCE(cr.fixed_current, 0) AS fixed_current,
+        COALESCE(cr.fixed_previous, 0) AS fixed_previous,
+        COALESCE(lc.gmv_current, 0) AS gmv_current,
+        COALESCE(lc.commission_current, 0) AS commission_current,
+        COALESCE(lp.commission_previous, 0) AS commission_previous,
+        COALESCE(bc.franchisor_current, 0) AS franchisor_current,
+        COALESCE(bc.franchisor_received, 0) AS franchisor_received,
+        COALESCE(bc.franchisor_overdue, 0) AS franchisor_overdue,
+        COALESCE(bc.franchisor_pending, 0) AS franchisor_pending
+      FROM tenants t
+      LEFT JOIN clientes_ativos ca ON ca.tenant_id = t.id
+      LEFT JOIN contratos_resumo cr ON cr.tenant_id = t.id
+      LEFT JOIN lives_current lc ON lc.tenant_id = t.id
+      LEFT JOIN lives_previous lp ON lp.tenant_id = t.id
+      LEFT JOIN boletos_current bc ON bc.tenant_id = t.id
+      WHERE t.id <> $1
+      ORDER BY (COALESCE(cr.fixed_current, 0) + COALESCE(lc.commission_current, 0)) DESC, t.nome ASC
+    `,
+    [
+      masterTenantId,
+      periodInfo.currentStart,
+      periodInfo.previousStart,
+      periodInfo.currentEnd,
+      periodInfo.previousEnd,
+    ]
+  )
+
+  const mapped = result.rows.map((row) => {
+    const fixedCurrent = toMoney(row.fixed_current)
+    const fixedPrevious = toMoney(row.fixed_previous)
+    const commissionCurrent = toMoney(row.commission_current)
+    const commissionPrevious = toMoney(row.commission_previous)
+    const grossRevenue = toMoney(fixedCurrent + commissionCurrent)
+    const previousGrossRevenue = toMoney(fixedPrevious + commissionPrevious)
+    const franchisorRevenue = toMoney(row.franchisor_current)
+    const unitNetRevenue = toMoney(Math.max(grossRevenue - franchisorRevenue, 0))
+    const growthPct = calculateGrowth(grossRevenue, previousGrossRevenue)
+    const takeRate = calculateRate(franchisorRevenue, grossRevenue)
+    const mappedRow = {
+      id: row.id,
+      name: row.nome,
+      is_active_tenant: Boolean(row.ativo),
+      active_clients: toInt(row.active_clients),
+      active_contracts: toInt(row.active_contracts),
+      pending_contracts: toInt(row.pending_contracts),
+      contract_pct: Number(Number(row.avg_contract_pct ?? 0).toFixed(1)),
+      fixed_revenue: fixedCurrent,
+      commission_revenue: commissionCurrent,
+      gmv_current: toMoney(row.gmv_current),
+      gross_revenue: grossRevenue,
+      previous_gross_revenue: previousGrossRevenue,
+      unit_net_revenue: unitNetRevenue,
+      franchisor_revenue: franchisorRevenue,
+      franchisor_received: toMoney(row.franchisor_received),
+      franchisor_overdue: toMoney(row.franchisor_overdue),
+      franchisor_pending: toMoney(row.franchisor_pending),
+      growth_pct: growthPct,
+      take_rate: takeRate,
+    }
+
+    return {
+      ...mappedRow,
+      status: deriveUnitStatus(mappedRow),
+    }
+  })
+
+  if (status === 'todos') {
+    return mapped
+  }
+
+  return mapped.filter((unit) => unit.status === status)
+}
+
+async function fetchHistoryRows(app, masterTenantId, periodInfo) {
+  const result = await app.db.query(
+    `
+      WITH months AS (
+        SELECT generate_series(
+          date_trunc('month', $2::date),
+          date_trunc('month', ($3::date - interval '1 month')),
+          interval '1 month'
+        ) AS month_start
+      ),
+      tenant_months AS (
+        SELECT
+          t.id AS tenant_id,
+          t.nome AS tenant_name,
+          m.month_start
+        FROM tenants t
+        CROSS JOIN months m
+        WHERE t.id <> $1
+      ),
+      fixed_revenue AS (
+        SELECT
+          tm.tenant_id,
+          tm.month_start,
+          COALESCE(SUM(c.valor_fixo) FILTER (
+            WHERE COALESCE(c.ativado_em, c.assinado_em, c.criado_em) < (tm.month_start + interval '1 month')
+              AND (c.cancelado_em IS NULL OR c.cancelado_em >= tm.month_start)
+              AND c.status != 'rascunho'
+          ), 0) AS fixed_revenue
+        FROM tenant_months tm
+        LEFT JOIN contratos c ON c.tenant_id = tm.tenant_id
+        GROUP BY tm.tenant_id, tm.month_start
+      ),
+      commission_revenue AS (
+        SELECT
+          tm.tenant_id,
+          tm.month_start,
+          COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS commission_revenue
+        FROM tenant_months tm
+        LEFT JOIN lives l
+          ON l.tenant_id = tm.tenant_id
+         AND COALESCE(l.encerrado_em, l.iniciado_em) >= tm.month_start
+         AND COALESCE(l.encerrado_em, l.iniciado_em) < (tm.month_start + interval '1 month')
+        LEFT JOIN LATERAL (
+          SELECT c.comissao_pct
+          FROM contratos c
+          WHERE c.tenant_id = tm.tenant_id
+            AND c.cliente_id = l.cliente_id
+          ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
+          LIMIT 1
+        ) ct ON TRUE
+        GROUP BY tm.tenant_id, tm.month_start
+      ),
+      franchisor_revenue AS (
+        SELECT
+          tm.tenant_id,
+          tm.month_start,
+          COALESCE(SUM(b.valor), 0) AS franchisor_revenue
+        FROM tenant_months tm
+        LEFT JOIN boletos b
+          ON b.tenant_id = tm.tenant_id
+         AND b.competencia >= tm.month_start
+         AND b.competencia < (tm.month_start + interval '1 month')
+        GROUP BY tm.tenant_id, tm.month_start
+      )
+      SELECT
+        tm.tenant_id,
+        tm.tenant_name,
+        to_char(tm.month_start, 'YYYY-MM') AS period,
+        COALESCE(fr.fixed_revenue, 0) AS fixed_revenue,
+        COALESCE(cr.commission_revenue, 0) AS commission_revenue,
+        COALESCE(br.franchisor_revenue, 0) AS franchisor_revenue
+      FROM tenant_months tm
+      LEFT JOIN fixed_revenue fr
+        ON fr.tenant_id = tm.tenant_id
+       AND fr.month_start = tm.month_start
+      LEFT JOIN commission_revenue cr
+        ON cr.tenant_id = tm.tenant_id
+       AND cr.month_start = tm.month_start
+      LEFT JOIN franchisor_revenue br
+        ON br.tenant_id = tm.tenant_id
+       AND br.month_start = tm.month_start
+      ORDER BY tm.month_start ASC, tm.tenant_name ASC
+    `,
+    [masterTenantId, periodInfo.historyStart, periodInfo.historyEnd]
+  )
+
+  return result.rows.map((row) => ({
+    unit_id: row.tenant_id,
+    unit_name: row.tenant_name,
+    period: row.period,
+    label: formatPeriodLabel(row.period),
+    gross_revenue: toMoney(toMoney(row.fixed_revenue) + toMoney(row.commission_revenue)),
+    franchisor_revenue: toMoney(row.franchisor_revenue),
+  }))
+}
+
+async function fetchUnitClients(app, masterTenantId, periodInfo) {
+  const mapRows = (rows) =>
+    rows.map((row) => {
+      const monthlyFee = toMoney(row.monthly_fee)
+      const liveRevenue = toMoney(row.live_revenue)
+      const grossRevenue = toMoney(monthlyFee + liveRevenue)
+      const contractStatus = row.contract_status ?? 'sem_contrato'
+      const clientStatus = row.client_status ?? 'negociacao'
+      const notes = [
+        `Cliente ${clientStatus}`,
+        row.contract_id ? `Contrato ${contractStatus}` : 'Sem contrato ativo',
+      ].join(' · ')
+
+      return {
+        unit_id: row.tenant_id,
+        id: row.client_id,
+        name: row.client_name,
+        status: clientStatus,
+        gross_revenue: grossRevenue,
+        contract_pct: Number(Number(row.contract_pct ?? 0).toFixed(1)),
+        franchisor_revenue: toMoney(row.franchisor_revenue),
+        monthly_fee: monthlyFee,
+        live_gmv: toMoney(row.live_gmv),
+        notes,
+      }
+    })
+
+  try {
+    const result = await app.db.query(
+      `
+        WITH client_lives AS (
+          SELECT
+            l.tenant_id,
+            l.cliente_id,
+            COALESCE(SUM(l.fat_gerado), 0) AS live_gmv,
+            COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
+          FROM lives l
+          LEFT JOIN LATERAL (
+            SELECT c.comissao_pct
+            FROM contratos c
+            WHERE c.tenant_id = l.tenant_id
+              AND c.cliente_id = l.cliente_id
+            ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
+            LIMIT 1
+          ) ct ON TRUE
+          WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+            AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
+          GROUP BY l.tenant_id, l.cliente_id
+        ),
+        client_boletos AS (
+          SELECT
+            tenant_id,
+            cliente_id,
+            COALESCE(SUM(valor), 0) AS franchisor_revenue
+          FROM boletos
+          WHERE competencia >= $2::date
+            AND competencia < $3::date
+          GROUP BY tenant_id, cliente_id
+        )
+        SELECT
+          cl.tenant_id,
+          cl.id AS client_id,
+          cl.nome AS client_name,
+          cl.status AS client_status,
+          ct.id AS contract_id,
+          ct.status AS contract_status,
+          COALESCE(ct.comissao_pct, 0) AS contract_pct,
+          COALESCE(ct.valor_fixo, 0) AS monthly_fee,
+          COALESCE(lv.live_gmv, 0) AS live_gmv,
+          COALESCE(lv.live_revenue, 0) AS live_revenue,
+          COALESCE(cb.franchisor_revenue, 0) AS franchisor_revenue
+        FROM clientes cl
+        LEFT JOIN LATERAL (
+          SELECT id, status, comissao_pct, valor_fixo
+          FROM contratos c
+          WHERE c.tenant_id = cl.tenant_id
+            AND c.cliente_id = cl.id
+          ORDER BY
+            CASE
+              WHEN c.status = 'ativo' THEN 0
+              WHEN c.status = 'em_analise' THEN 1
+              WHEN c.status = 'enviado' THEN 2
+              ELSE 3
+            END,
+            c.criado_em DESC
+          LIMIT 1
+        ) ct ON TRUE
+        LEFT JOIN client_lives lv
+          ON lv.tenant_id = cl.tenant_id
+         AND lv.cliente_id = cl.id
+        LEFT JOIN client_boletos cb
+          ON cb.tenant_id = cl.tenant_id
+         AND cb.cliente_id = cl.id
+        WHERE cl.tenant_id <> $1
+        ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
+      `,
+      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd]
+    )
+
+    return mapRows(result.rows)
+  } catch (err) {
+    app.log.warn({ err }, 'master/unidades: fallback sem boletos por cliente')
+
+    const fallback = await app.db.query(
+      `
+        WITH client_lives AS (
+          SELECT
+            l.tenant_id,
+            l.cliente_id,
+            COALESCE(SUM(l.fat_gerado), 0) AS live_gmv,
+            COALESCE(SUM(l.fat_gerado * COALESCE(ct.comissao_pct, 0) / 100.0), 0) AS live_revenue
+          FROM lives l
+          LEFT JOIN LATERAL (
+            SELECT c.comissao_pct
+            FROM contratos c
+            WHERE c.tenant_id = l.tenant_id
+              AND c.cliente_id = l.cliente_id
+            ORDER BY CASE WHEN c.status = 'ativo' THEN 0 ELSE 1 END, c.criado_em DESC
+            LIMIT 1
+          ) ct ON TRUE
+          WHERE COALESCE(l.encerrado_em, l.iniciado_em) >= $2::date
+            AND COALESCE(l.encerrado_em, l.iniciado_em) < $3::date
+          GROUP BY l.tenant_id, l.cliente_id
+        )
+        SELECT
+          cl.tenant_id,
+          cl.id AS client_id,
+          cl.nome AS client_name,
+          cl.status AS client_status,
+          ct.id AS contract_id,
+          ct.status AS contract_status,
+          COALESCE(ct.comissao_pct, 0) AS contract_pct,
+          COALESCE(ct.valor_fixo, 0) AS monthly_fee,
+          COALESCE(lv.live_gmv, 0) AS live_gmv,
+          COALESCE(lv.live_revenue, 0) AS live_revenue,
+          0 AS franchisor_revenue
+        FROM clientes cl
+        LEFT JOIN LATERAL (
+          SELECT id, status, comissao_pct, valor_fixo
+          FROM contratos c
+          WHERE c.tenant_id = cl.tenant_id
+            AND c.cliente_id = cl.id
+          ORDER BY
+            CASE
+              WHEN c.status = 'ativo' THEN 0
+              WHEN c.status = 'em_analise' THEN 1
+              WHEN c.status = 'enviado' THEN 2
+              ELSE 3
+            END,
+            c.criado_em DESC
+          LIMIT 1
+        ) ct ON TRUE
+        LEFT JOIN client_lives lv
+          ON lv.tenant_id = cl.tenant_id
+         AND lv.cliente_id = cl.id
+        WHERE cl.tenant_id <> $1
+        ORDER BY cl.tenant_id, (COALESCE(ct.valor_fixo, 0) + COALESCE(lv.live_revenue, 0)) DESC, cl.nome ASC
+      `,
+      [masterTenantId, periodInfo.currentStart, periodInfo.currentEnd]
+    )
+
+    return mapRows(fallback.rows)
+  }
+}
+
+async function fetchStalledContracts(app, masterTenantId) {
+  const result = await app.db.query(
+    `
+      SELECT
+        t.id AS unit_id,
+        t.nome AS unit_name,
+        c.id AS contract_id,
+        c.status,
+        cl.nome AS client_name,
+        COALESCE(c.assinado_em, c.criado_em) AS reference_date
+      FROM contratos c
+      JOIN tenants t ON t.id = c.tenant_id
+      LEFT JOIN clientes cl ON cl.id = c.cliente_id
+      WHERE c.tenant_id <> $1
+        AND c.status IN ('rascunho', 'enviado', 'em_analise')
+        AND COALESCE(c.assinado_em, c.criado_em) < NOW() - interval '7 days'
+      ORDER BY reference_date ASC
+      LIMIT 5
+    `,
+    [masterTenantId]
+  )
+
+  return result.rows.map((row) => ({
+    unit_id: row.unit_id,
+    unit_name: row.unit_name,
+    contract_id: row.contract_id,
+    contract_status: row.status,
+    client_name: row.client_name,
+    reference_date: row.reference_date,
+  }))
+}
+
+async function fetchCrmSnapshot(app, masterTenantId) {
+  const result = await app.db.query(
+    `
+      SELECT
+        COUNT(*) AS total_leads,
+        COALESCE(SUM(fat_estimado), 0) AS estimated_value,
+        COUNT(*) FILTER (WHERE status = 'disponivel') AS lead_pool,
+        COUNT(*) FILTER (WHERE status = 'pego') AS engaged_leads,
+        COUNT(*) FILTER (WHERE status = 'expirado') AS expired_leads
+      FROM leads
+      WHERE franqueadora_id = $1
+    `,
+    [masterTenantId]
+  )
+
+  const row = result.rows[0] ?? {}
+
+  return {
+    is_placeholder: true,
+    summary: {
+      total_leads: toInt(row.total_leads),
+      estimated_value: toMoney(row.estimated_value),
+      lead_pool: toInt(row.lead_pool),
+      engaged_leads: toInt(row.engaged_leads),
+      expired_leads: toInt(row.expired_leads),
+    },
+    pipeline: MASTER_PIPELINE_STAGES.map((stage) => ({
+      stage,
+      count: 0,
+      value: 0,
+    })),
+    recommended_fields: [
+      'Nome do lead',
+      'Tipo do lead',
+      'Origem',
+      'Responsável',
+      'Estágio',
+      'Valor potencial',
+      'Próxima ação',
+      'Data de follow-up',
+      'Observações',
+    ],
+    message:
+      'Placeholder preparado para a evolução do CRM global da franqueadora. O backend já responde sem erro e o funil pode ser conectado depois ao modelo real de expansão.',
+  }
+}
+
+function buildHistoryMaps(historyRows, unitIds, periods) {
+  const networkByPeriod = new Map(
+    periods.map((period) => [
+      period,
+      {
+        period,
+        label: formatPeriodLabel(period),
+        gross_revenue: 0,
+        franchisor_revenue: 0,
+      },
+    ])
+  )
+
+  const unitHistoryMap = new Map(
+    unitIds.map((unitId) => [
+      unitId,
+      periods.map((period) => ({
+        period,
+        label: formatPeriodLabel(period),
+        gross_revenue: 0,
+        franchisor_revenue: 0,
+      })),
+    ])
+  )
+
+  for (const row of historyRows) {
+    const networkPoint = networkByPeriod.get(row.period)
+    if (networkPoint) {
+      networkPoint.gross_revenue = toMoney(networkPoint.gross_revenue + row.gross_revenue)
+      networkPoint.franchisor_revenue = toMoney(
+        networkPoint.franchisor_revenue + row.franchisor_revenue
+      )
+    }
+
+    const unitHistory = unitHistoryMap.get(row.unit_id)
+    if (!unitHistory) continue
+
+    const index = unitHistory.findIndex((point) => point.period === row.period)
+    if (index >= 0) {
+      unitHistory[index] = {
+        period: row.period,
+        label: row.label,
+        gross_revenue: row.gross_revenue,
+        franchisor_revenue: row.franchisor_revenue,
+      }
+    }
+  }
+
+  return {
+    networkHistory: periods.map((period) => networkByPeriod.get(period)),
+    unitHistoryMap,
+  }
+}
+
+function buildAlerts(units, stalledContracts) {
+  const alerts = []
+
+  for (const unit of units.filter((item) => item.gross_revenue <= 0).slice(0, 3)) {
+    alerts.push({
+      type: 'unit_without_sales',
+      severity: 'alta',
+      unit_id: unit.id,
+      unit_name: unit.name,
+      title: 'Unidade sem venda no período',
+      description: `${unit.name} ainda não registrou faturamento no período selecionado.`,
+    })
+  }
+
+  for (const unit of units.filter((item) => item.growth_pct <= -20).slice(0, 3)) {
+    alerts.push({
+      type: 'revenue_drop',
+      severity: 'alta',
+      unit_id: unit.id,
+      unit_name: unit.name,
+      title: 'Queda forte de receita',
+      description: `${unit.name} caiu ${Number(unit.growth_pct.toFixed(1))}% versus o mês anterior.`,
+    })
+  }
+
+  for (const unit of units.filter((item) => item.franchisor_overdue > 0).slice(0, 3)) {
+    alerts.push({
+      type: 'delinquency',
+      severity: 'alta',
+      unit_id: unit.id,
+      unit_name: unit.name,
+      title: 'Inadimplência na unidade',
+      description: `${unit.name} tem ${formatCurrency(unit.franchisor_overdue)} em aberto com a franqueadora.`,
+    })
+  }
+
+  for (const contract of stalledContracts) {
+    alerts.push({
+      type: 'stalled_contract',
+      severity: 'media',
+      unit_id: contract.unit_id,
+      unit_name: contract.unit_name,
+      title: 'Contrato parado na pipeline',
+      description: `${contract.client_name ?? 'Contrato sem cliente'} está em ${labelContractStatus(contract.contract_status)} há mais de 7 dias.`,
+    })
+  }
+
+  return alerts.slice(0, 8)
+}
+
+function buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts) {
+  const periods = periodInfo.historyPeriods
+  const { networkHistory } = buildHistoryMaps(
+    historyRows,
+    units.map((unit) => unit.id),
+    periods
+  )
+
+  const faturamentoBruto = toMoney(
+    units.reduce((sum, unit) => sum + unit.gross_revenue, 0)
+  )
+  const receitaFranqueadora = toMoney(
+    units.reduce((sum, unit) => sum + unit.franchisor_revenue, 0)
+  )
+  const unidadesAtivas = units.filter((unit) => unit.status !== 'inativo').length
+  const clientesAtivos = units.reduce((sum, unit) => sum + unit.active_clients, 0)
+  const contratosPendentes = units.reduce((sum, unit) => sum + unit.pending_contracts, 0)
+  const faturamentoAnterior = toMoney(
+    units.reduce((sum, unit) => sum + unit.previous_gross_revenue, 0)
+  )
+  const crescimentoPct = calculateGrowth(faturamentoBruto, faturamentoAnterior)
+  const inadimplenciaValor = toMoney(
+    units.reduce((sum, unit) => sum + unit.franchisor_overdue, 0)
+  )
+  const inadimplenciaPct = calculateRate(inadimplenciaValor, receitaFranqueadora)
+  const ticketMedio = unidadesAtivas > 0 ? toMoney(faturamentoBruto / unidadesAtivas) : 0
+  const alerts = buildAlerts(units, stalledContracts)
+  const uniqueAlertUnits = new Set(alerts.map((alert) => alert.unit_id).filter(Boolean)).size
+
+  const cards = {
+    unidades_ativas: unidadesAtivas,
+    clientes_ativos: clientesAtivos,
+    faturamento_bruto_rede: faturamentoBruto,
+    receita_liquida_franqueadora: receitaFranqueadora,
+    contratos_pendentes: contratosPendentes,
+    crescimento_percentual: crescimentoPct,
+    inadimplencia_valor: inadimplenciaValor,
+    inadimplencia_percentual: inadimplenciaPct,
+    ticket_medio_unidade: ticketMedio,
+  }
+
+  return {
+    periodo: periodInfo.period,
+    periodo_anterior: periodInfo.previousPeriod,
+    cards,
+    resumo_executivo: buildExecutiveSummary(cards, uniqueAlertUnits),
+    rankings: {
+      faturamento: [...units]
+        .sort((a, b) => b.gross_revenue - a.gross_revenue)
+        .slice(0, 5)
+        .map((unit) => ({
+          unit_id: unit.id,
+          unit_name: unit.name,
+          gross_revenue: unit.gross_revenue,
+          growth_pct: unit.growth_pct,
+        })),
+      crescimento: [...units]
+        .sort((a, b) => b.growth_pct - a.growth_pct)
+        .slice(0, 5)
+        .map((unit) => ({
+          unit_id: unit.id,
+          unit_name: unit.name,
+          gross_revenue: unit.gross_revenue,
+          growth_pct: unit.growth_pct,
+        })),
+    },
+    alertas: alerts,
+    historico_rede: networkHistory,
+    crescimento_unidades: [...units]
+      .sort((a, b) => b.growth_pct - a.growth_pct)
+      .slice(0, 8)
+      .map((unit) => ({
+        unit_id: unit.id,
+        unit_name: unit.name,
+        growth_pct: unit.growth_pct,
+        gross_revenue: unit.gross_revenue,
+        previous_gross_revenue: unit.previous_gross_revenue,
+      })),
+    crm_pipeline: crmSnapshot.pipeline,
+    comissionamento: {
+      previsto: receitaFranqueadora,
+      recebido: toMoney(units.reduce((sum, unit) => sum + unit.franchisor_received, 0)),
+      pendente: toMoney(units.reduce((sum, unit) => sum + unit.franchisor_pending, 0)),
+      inadimplente: inadimplenciaValor,
+    },
+  }
+}
+
 export async function franqueadoRoutes(app) {
+  const masterAccess = {
+    onRequest: [app.authenticate, app.requirePapel(['franqueador_master'])],
+  }
+
+  // Compatibilidade com a tela antiga do franqueador.
   app.get(
     '/v1/franqueado/unidades',
-    { onRequest: [app.authenticate, app.requirePapel(['franqueador_master'])] },
+    masterAccess,
     async (req, reply) => {
       try {
-        const { rows } = await app.db.query(`
-          SELECT
-            t.id,
-            t.nome,
-            COUNT(DISTINCT c.id) FILTER (WHERE c.status = 'ativo')     AS clientes_count,
-            COALESCE(SUM(l.fat_gerado), 0)                             AS fat_mes,
-            COUNT(DISTINCT ct.id) FILTER (
-              WHERE ct.status IN ('gerado','enviado','em_analise'))     AS contratos_pendentes,
-            CASE WHEN COUNT(DISTINCT u.id) > 0 THEN 'ativo' ELSE 'inativo' END AS status
-          FROM tenants t
-          LEFT JOIN users      u  ON u.tenant_id = t.id AND u.ativo = TRUE
-          LEFT JOIN clientes   c  ON c.tenant_id = t.id
-          LEFT JOIN contratos  ct ON ct.tenant_id = t.id
-          LEFT JOIN lives      l  ON l.tenant_id = t.id
-            AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
-          WHERE t.id != $1
-          GROUP BY t.id, t.nome
-          ORDER BY fat_mes DESC
-        `, [req.user.tenant_id])
+        const { rows } = await app.db.query(
+          `
+            SELECT
+              t.id,
+              t.nome,
+              COUNT(DISTINCT c.id) FILTER (WHERE c.status = 'ativo') AS clientes_count,
+              COALESCE(SUM(l.fat_gerado), 0) AS fat_mes,
+              COUNT(DISTINCT ct.id) FILTER (
+                WHERE ct.status IN ('gerado', 'enviado', 'em_analise')
+              ) AS contratos_pendentes,
+              CASE WHEN COUNT(DISTINCT u.id) > 0 THEN 'ativo' ELSE 'inativo' END AS status
+            FROM tenants t
+            LEFT JOIN users u ON u.tenant_id = t.id AND u.ativo = TRUE
+            LEFT JOIN clientes c ON c.tenant_id = t.id
+            LEFT JOIN contratos ct ON ct.tenant_id = t.id
+            LEFT JOIN lives l
+              ON l.tenant_id = t.id
+             AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+            WHERE t.id != $1
+            GROUP BY t.id, t.nome
+            ORDER BY fat_mes DESC
+          `,
+          [req.user.tenant_id]
+        )
 
-        const unidades = rows.map(r => ({
-          ...r,
-          fat_mes: Number(r.fat_mes ?? 0),
-          clientes_count: Number(r.clientes_count ?? 0),
-          contratos_pendentes: Number(r.contratos_pendentes ?? 0),
+        const unidades = rows.map((row) => ({
+          ...row,
+          fat_mes: Number(row.fat_mes ?? 0),
+          clientes_count: Number(row.clientes_count ?? 0),
+          contratos_pendentes: Number(row.contratos_pendentes ?? 0),
         }))
 
         return reply.send(unidades)
@@ -42,4 +892,172 @@ export async function franqueadoRoutes(app) {
       }
     }
   )
+
+  app.get('/v1/master/dashboard', masterAccess, async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
+      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
+      const stalledContracts = await fetchStalledContracts(app, request.user.tenant_id)
+
+      return reply.send(
+        buildDashboardPayload(units, historyRows, periodInfo, crmSnapshot, stalledContracts)
+      )
+    } catch (err) {
+      request.log.error({ err }, 'master/dashboard: erro')
+      throw err
+    }
+  })
+
+  app.get('/v1/master/unidades', masterAccess, async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const status = normalizeStatus(request.query?.status)
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
+      const unitClients = await fetchUnitClients(app, request.user.tenant_id, periodInfo)
+      const { unitHistoryMap } = buildHistoryMaps(
+        historyRows,
+        units.map((unit) => unit.id),
+        periodInfo.historyPeriods
+      )
+      const clientsByUnit = new Map()
+
+      for (const client of unitClients) {
+        const collection = clientsByUnit.get(client.unit_id) ?? []
+        collection.push({
+          id: client.id,
+          name: client.name,
+          status: client.status,
+          gross_revenue: client.gross_revenue,
+          contract_pct: client.contract_pct,
+          franchisor_revenue: client.franchisor_revenue,
+          monthly_fee: client.monthly_fee,
+          live_gmv: client.live_gmv,
+          notes: client.notes,
+        })
+        clientsByUnit.set(client.unit_id, collection)
+      }
+
+      const payloadUnits = units.map((unit) => ({
+        id: unit.id,
+        name: unit.name,
+        status: unit.status,
+        region: null,
+        active_clients: unit.active_clients,
+        gross_revenue: unit.gross_revenue,
+        unit_net_revenue: unit.unit_net_revenue,
+        franchisor_revenue: unit.franchisor_revenue,
+        growth_pct: unit.growth_pct,
+        contract_pct: unit.contract_pct,
+        pending_contracts: unit.pending_contracts,
+        take_rate: unit.take_rate,
+        history: unitHistoryMap.get(unit.id) ?? [],
+        clients: clientsByUnit.get(unit.id) ?? [],
+      }))
+
+      return reply.send({
+        periodo: periodInfo.period,
+        status,
+        summary: {
+          total_unidades: payloadUnits.length,
+          clientes_ativos: payloadUnits.reduce((sum, unit) => sum + unit.active_clients, 0),
+          faturamento_bruto: toMoney(
+            payloadUnits.reduce((sum, unit) => sum + unit.gross_revenue, 0)
+          ),
+          receita_franqueadora: toMoney(
+            payloadUnits.reduce((sum, unit) => sum + unit.franchisor_revenue, 0)
+          ),
+        },
+        units: payloadUnits,
+      })
+    } catch (err) {
+      request.log.error({ err }, 'master/unidades: erro')
+      throw err
+    }
+  })
+
+  app.get('/v1/master/consolidado', masterAccess, async (request, reply) => {
+    try {
+      const periodInfo = parsePeriod(request.query?.periodo)
+      const status = normalizeStatus(request.query?.status)
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, periodInfo, status)
+      const historyRows = await fetchHistoryRows(app, request.user.tenant_id, periodInfo)
+      const { networkHistory } = buildHistoryMaps(
+        historyRows,
+        units.map((unit) => unit.id),
+        periodInfo.historyPeriods
+      )
+
+      const grossRevenue = toMoney(units.reduce((sum, unit) => sum + unit.gross_revenue, 0))
+      const previousGross = toMoney(
+        units.reduce((sum, unit) => sum + unit.previous_gross_revenue, 0)
+      )
+      const franchisorRevenue = toMoney(
+        units.reduce((sum, unit) => sum + unit.franchisor_revenue, 0)
+      )
+      const fixedRevenue = toMoney(units.reduce((sum, unit) => sum + unit.fixed_revenue, 0))
+      const commissionRevenue = toMoney(
+        units.reduce((sum, unit) => sum + unit.commission_revenue, 0)
+      )
+      const overdueRevenue = toMoney(
+        units.reduce((sum, unit) => sum + unit.franchisor_overdue, 0)
+      )
+      const pendingRevenue = toMoney(
+        units.reduce((sum, unit) => sum + unit.franchisor_pending, 0)
+      )
+
+      return reply.send({
+        periodo: periodInfo.period,
+        status,
+        overview: {
+          faturamento_bruto_rede: grossRevenue,
+          receita_franqueadora: franchisorRevenue,
+          receita_mensalidade: fixedRevenue,
+          receita_comissao: commissionRevenue,
+          receita_outros: 0,
+          crescimento_percentual: calculateGrowth(grossRevenue, previousGross),
+          mrr_rede: fixedRevenue,
+          take_rate_medio: calculateRate(franchisorRevenue, grossRevenue),
+          previsao_recebimento: toMoney(pendingRevenue + overdueRevenue),
+          inadimplencia_valor: overdueRevenue,
+          inadimplencia_percentual: calculateRate(overdueRevenue, franchisorRevenue),
+          comparativo_valor: toMoney(grossRevenue - previousGross),
+        },
+        historico: networkHistory,
+        units: units.map((unit) => ({
+          id: unit.id,
+          name: unit.name,
+          status: unit.status,
+          gross_revenue: unit.gross_revenue,
+          contract_pct: unit.contract_pct,
+          franchisor_revenue: unit.franchisor_revenue,
+          growth_pct: unit.growth_pct,
+          take_rate: unit.take_rate,
+        })),
+      })
+    } catch (err) {
+      request.log.error({ err }, 'master/consolidado: erro')
+      throw err
+    }
+  })
+
+  app.get('/v1/master/crm', masterAccess, async (request, reply) => {
+    try {
+      const crmSnapshot = await fetchCrmSnapshot(app, request.user.tenant_id)
+      const units = await fetchUnitSummaries(app, request.user.tenant_id, parsePeriod(request.query?.periodo))
+
+      return reply.send({
+        ...crmSnapshot,
+        summary: {
+          ...crmSnapshot.summary,
+          contratos_pendentes: units.reduce((sum, unit) => sum + unit.pending_contracts, 0),
+        },
+      })
+    } catch (err) {
+      request.log.error({ err }, 'master/crm: erro')
+      throw err
+    }
+  })
 }
