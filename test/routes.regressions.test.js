@@ -10,6 +10,7 @@ import { clienteDashboardRoutes } from '../src/routes/cliente_dashboard.js'
 import { financeiroRoutes } from '../src/routes/financeiro.js'
 import { franqueadoRoutes } from '../src/routes/franqueado.js'
 import { leadsRoutes } from '../src/routes/leads.js'
+import { solicitacoesRoutes } from '../src/routes/solicitacoes.js'
 
 const ENV_KEYS = [
   'JWT_SECRET',
@@ -222,6 +223,64 @@ describe('Route regressions: SQL and RBAC', () => {
     expect(sql).toContain('COALESCE(l.cliente_id, ct.cliente_id) AS cliente_id')
     expect(sql).toContain('COALESCE(ls.viewer_count, 0) AS viewer_count')
     expect(sql).toContain('COALESCE(ls.gmv, 0) AS gmv_atual')
+    expect(releaseMock).toHaveBeenCalledTimes(1)
+
+    await app.close()
+  })
+
+  it('solicitacoes aprovar accepts explicit empty body', async () => {
+    const app = Fastify()
+    const requestId = '11111111-1111-4111-8111-111111111111'
+    const cabineId = '22222222-2222-4222-8222-222222222222'
+    const queryMock = vi.fn()
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{
+          id: requestId,
+          cabine_id: cabineId,
+          data_solicitada: '2026-04-24',
+          hora_inicio: '14:00:00',
+          hora_fim: '16:00:00',
+          status: 'pendente',
+        }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({
+        rows: [{ id: requestId, status: 'aprovada', atualizado_em: '2026-04-24T12:00:00.000Z' }],
+      })
+      .mockResolvedValueOnce({ rows: [] })
+    const releaseMock = vi.fn()
+    const connectMock = vi.fn().mockResolvedValue({
+      query: queryMock,
+      release: releaseMock,
+    })
+
+    app.decorate('authenticate', async (request) => {
+      request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+    })
+    app.decorate('requirePapel', (papeis) => async (request, reply) => {
+      if (!request.user) {
+        request.user = { tenant_id: 'tenant-1', sub: 'user-1', papel: 'franqueado' }
+      }
+      if (!papeis.includes(request.user.papel)) {
+        return reply.code(403).send({ error: 'Acesso não autorizado para este papel' })
+      }
+    })
+    app.decorate('db', { pool: { connect: connectMock } })
+
+    await app.register(solicitacoesRoutes)
+
+    const response = await app.inject({
+      method: 'PATCH',
+      url: `/v1/solicitacoes/${requestId}/aprovar`,
+      payload: {},
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({ id: requestId, status: 'aprovada' })
+    expect(queryMock.mock.calls[2][0]).toContain('FROM live_requests')
+    expect(queryMock.mock.calls[4][0]).toContain("SET status = 'aprovada'")
     expect(releaseMock).toHaveBeenCalledTimes(1)
 
     await app.close()

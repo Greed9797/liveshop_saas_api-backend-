@@ -113,7 +113,9 @@ export async function cabinesRoutes(app) {
            ORDER BY captured_at DESC
            LIMIT 1
          ) ls ON true
-         ORDER BY c.numero`
+         WHERE c.tenant_id = $1
+         ORDER BY c.numero`,
+        [tenant_id]
       )
 
       return result.rows.map(c => ({

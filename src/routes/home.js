@@ -15,7 +15,8 @@ export async function homeRoutes(app) {
         SELECT COALESCE(SUM(l.fat_gerado * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
         FROM lives l
         JOIN contratos c ON c.cliente_id = l.cliente_id AND c.status = 'ativo'
-        WHERE date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
+        WHERE l.status = 'encerrada'
+          AND date_trunc('month', l.iniciado_em) = date_trunc('month', NOW())
       `)
 
       // Financeiro: Custos do mês
@@ -51,8 +52,9 @@ export async function homeRoutes(app) {
             WHERE live_id = c.live_atual_id 
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
+        WHERE c.tenant_id = $1
         ORDER BY c.numero
-      `)
+      `, [tenant_id])
 
       const cabinesFormatadas = cabinesQ.rows.map(c => {
         let duracaoMin = 0;
@@ -74,7 +76,11 @@ export async function homeRoutes(app) {
       });
 
       // 3. Resumo do Mês
-      const clientesQ = await db.query(`SELECT COUNT(*) AS total FROM clientes WHERE status = 'ativo'`)
+      const clientesQ = await db.query(`
+        SELECT COUNT(*) AS total
+        FROM clientes
+        WHERE status IN ('ativo', 'risco_churn', 'alerta', 'satisfeito')
+      `)
       const novosClientesQ = await db.query(`
         SELECT COUNT(*) AS total FROM contratos 
         WHERE date_trunc('month', assinado_em) = date_trunc('month', NOW())
@@ -88,7 +94,8 @@ export async function homeRoutes(app) {
       const livesMesQ = await db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
         FROM lives
-        WHERE date_trunc('month', iniciado_em) = date_trunc('month', NOW())
+        WHERE status = 'encerrada'
+          AND date_trunc('month', iniciado_em) = date_trunc('month', NOW())
       `)
 
       const mediaViewersQ = await db.query(`
@@ -111,7 +118,8 @@ export async function homeRoutes(app) {
         SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
         FROM lives l
         JOIN clientes cl ON cl.id = l.cliente_id
-        WHERE date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
+        WHERE l.status = 'encerrada'
+          AND date_trunc('day', l.iniciado_em) = date_trunc('day', NOW())
         GROUP BY cl.id, cl.nome
         ORDER BY gmv DESC
         LIMIT 5
