@@ -53,9 +53,8 @@ export async function homeRoutes(app) {
             WHERE live_id = c.live_atual_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
-        WHERE c.ativo IS NOT FALSE
         ORDER BY c.numero
-      `, [tenant_id])
+      `)
 
       const cabinesFormatadas = cabinesQ.rows.map(c => {
         let duracaoMin = 0;

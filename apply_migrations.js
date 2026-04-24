@@ -40,15 +40,17 @@ async function main() {
     '021_tiktok_live_connector.sql',
     '022_tenant_settings.sql',
     '023_billing_batch_setup.sql',
-    '025_create_live_requests.sql',
-    '026_add_analytics_dashboard_indexes.sql',
-    '029_lives_tiktok_fields.sql',
+    '024_schema_fixes.txt',          // meta_diaria_gmv em tenants + índices FK
+    '025_create_live_requests.txt',  // tabela live_requests (solicitações de live)
+    '026_add_analytics_dashboard_indexes.txt',
+    '029_lives_tiktok_fields.txt',   // campos TikTok em lives + live_snapshots
     '030_create_pacotes.sql',
     '031_pacotes_contratos_horas.sql',
     '032_cabines_config.sql',
     '033_add_roles_apresentador_gerente.sql',
     '034_contratos_pacote.sql',
     '035_manuais_metadata.sql',
+    '036_cabines_ativo.sql',         // coluna ativo em cabines
   ]
 
   for (const migration of pendingMigrations) {
