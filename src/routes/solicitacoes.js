@@ -1,3 +1,15 @@
+import { z } from 'zod'
+
+const agendamentoSchema = z.object({
+  cabine_id:        z.string().uuid(),
+  cliente_id:       z.string().uuid(),
+  apresentadora_id: z.string().uuid().optional().nullable(),
+  data_solicitada:  z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/),
+  hora_fim:         z.string().regex(/^\d{2}:\d{2}$/),
+  observacao:       z.string().optional(),
+})
+
 export async function solicitacoesRoutes(app) {
   // GET /v1/solicitacoes — lista solicitações (franqueador/franqueador_master)
   // Query param: ?status=pendente (default) | aprovada | recusada | all
@@ -62,12 +74,6 @@ export async function solicitacoesRoutes(app) {
 
   // PATCH /v1/solicitacoes/:id/aprovar — aprovar solicitação com check de overlap
   app.patch('/v1/solicitacoes/:id/aprovar', {
-    schema: {
-      body: {
-        type: 'object',
-        additionalProperties: false,
-      },
-    },
     preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
   }, async (request, reply) => {
     const { tenant_id, sub: user_id } = request.user
@@ -178,6 +184,56 @@ export async function solicitacoesRoutes(app) {
       return updated.rows[0]
     } finally {
       db.release()
+    }
+  })
+
+  // POST /v1/solicitacoes — franqueado cria agendamento diretamente (já aprovado)
+  app.post('/v1/solicitacoes', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master', 'gerente'])],
+  }, async (request, reply) => {
+    const parsed = agendamentoSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id, sub: user_id } = request.user
+    const d = parsed.data
+
+    const client = await app.db.pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(`SELECT set_config('app.tenant_id', $1, true)`, [tenant_id])
+
+      // Verifica overlap
+      const overlapQ = await client.query(`
+        SELECT id FROM live_requests
+        WHERE tenant_id = $1
+          AND cabine_id = $2
+          AND data_solicitada = $3
+          AND status = 'aprovada'
+          AND hora_inicio < $5
+          AND hora_fim > $4
+      `, [tenant_id, d.cabine_id, d.data_solicitada, d.hora_inicio, d.hora_fim])
+
+      if (overlapQ.rows.length > 0) {
+        await client.query('ROLLBACK')
+        return reply.code(409).send({ error: 'Conflito de horário: já existe um agendamento aprovado neste período para esta cabine' })
+      }
+
+      const result = await client.query(`
+        INSERT INTO live_requests
+          (tenant_id, cabine_id, cliente_id, solicitante_id, apresentadora_id,
+           data_solicitada, hora_inicio, hora_fim, observacao, status, aprovado_por)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'aprovada', $4)
+        RETURNING id, status, data_solicitada, hora_inicio, hora_fim, criado_em
+      `, [tenant_id, d.cabine_id, d.cliente_id, user_id, d.apresentadora_id ?? null,
+          d.data_solicitada, d.hora_inicio, d.hora_fim, d.observacao ?? null])
+
+      await client.query('COMMIT')
+      return reply.code(201).send(result.rows[0])
+    } catch (e) {
+      await client.query('ROLLBACK')
+      throw e
+    } finally {
+      client.release()
     }
   })
 }
