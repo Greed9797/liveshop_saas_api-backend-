@@ -103,6 +103,26 @@ export async function clientesRoutes(app) {
     }
   })
 
+  // GET /v1/clientes/metricas — métricas agregadas: LTV, faturamento, lives, comissão
+  app.get('/v1/clientes/metricas', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `SELECT
+           COALESCE(SUM(l.fat_gerado), 0)           AS ltv_total,
+           COALESCE(SUM(l.fat_gerado), 0)           AS faturamento_acumulado,
+           COUNT(l.id)::int                          AS total_lives,
+           COALESCE(SUM(l.comissao_calculada), 0)   AS comissao_paga
+         FROM lives l
+         WHERE l.status = 'encerrada'`
+      )
+      return result.rows[0]
+    } finally {
+      db.release()
+    }
+  })
+
   // GET /v1/clientes
   app.get('/v1/clientes', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request) => {
     const { tenant_id } = request.user
@@ -111,7 +131,7 @@ export async function clientesRoutes(app) {
       const result = await db.query(
         `SELECT cl.id, cl.nome, cl.celular, cl.email, cl.status, cl.lat, cl.lng,
                 cl.fat_anual, cl.nicho, cl.score, cl.cep, cl.cidade, cl.estado,
-                cl.siga, cl.criado_em,
+                cl.siga, cl.criado_em, cl.meta_diaria_gmv,
                 c.horas_contratadas, c.horas_consumidas,
                 (c.horas_contratadas - c.horas_consumidas) AS horas_restantes
          FROM clientes cl
@@ -122,6 +142,7 @@ export async function clientesRoutes(app) {
            ORDER BY ativado_em DESC NULLS LAST
            LIMIT 1
          ) c ON true
+         WHERE cl.status IN ('ativo', 'inadimplente', 'cancelado')
          ORDER BY cl.criado_em DESC`
       )
       return result.rows
@@ -148,9 +169,17 @@ export async function clientesRoutes(app) {
   // PATCH /v1/clientes/:id
   app.patch('/v1/clientes/:id', { preHandler: app.requirePapel(['franqueado', 'gerente']) }, async (request, reply) => {
     const { tenant_id } = request.user
-    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status']
+    const allowed = ['nome','celular','email','fat_anual','nicho','site','vende_tiktok','lat','lng','status','meta_diaria_gmv','onboarding_step']
+    const body = { ...request.body }
+
+    // Onboarding automático: se status === 'ganho', promove para onboarding + step 1
+    if (body.status === 'ganho') {
+      body.status = 'onboarding'
+      body.onboarding_step = 1
+    }
+
     const updates = Object.fromEntries(
-      Object.entries(request.body).filter(([k]) => allowed.includes(k))
+      Object.entries(body).filter(([k]) => allowed.includes(k))
     )
     if (Object.keys(updates).length === 0) {
       return reply.code(400).send({ error: 'Nenhum campo válido para atualizar' })
@@ -164,7 +193,7 @@ export async function clientesRoutes(app) {
     try {
       const result = await db.query(
         `UPDATE clientes SET ${set}, atualizado_em = NOW()
-         WHERE id = $${keys.length + 1} RETURNING id, nome, status`,
+         WHERE id = $${keys.length + 1} RETURNING id, nome, status, onboarding_step`,
         [...vals, request.params.id]
       )
       if (!result.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
