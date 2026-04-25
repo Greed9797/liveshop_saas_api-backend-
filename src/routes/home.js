@@ -9,7 +9,7 @@ export async function homeRoutes(app) {
     try {
       // 1. Financeiro: Faturamento Fixo dos contratos ativos
       const fixoQ = await db.query(`SELECT COALESCE(SUM(valor_fixo), 0) AS valor FROM contratos WHERE status = 'ativo'`)
-      
+
       // Financeiro: Comissão das Lives do mês (GMV * % da comissão)
       const varQ = await db.query(`
         SELECT COALESCE(SUM(l.fat_gerado * (COALESCE(c.comissao_pct, 0) / 100.0)), 0) AS valor
@@ -34,7 +34,6 @@ export async function homeRoutes(app) {
       const fatLiquido = fatBruto - totalCustos
 
       // 2. Cabines (Status real-time do TikTok usando snapshots via LATERAL JOIN)
-      // Filtra ativo IS NOT FALSE para coincidir com a tela de configurações
       const cabinesQ = await db.query(`
         SELECT
             c.numero, c.status, c.live_atual_id,
@@ -76,20 +75,17 @@ export async function homeRoutes(app) {
       });
 
       // 3. Resumo do Mês
-      // Clientes ativos = status explicitamente ativos (coincide com tela de clientes)
       const clientesQ = await db.query(`
         SELECT COUNT(*) AS total
         FROM clientes
         WHERE status NOT IN ('cancelado')
       `)
-      // Novos clientes do mês = clientes criados no mês corrente
       const novosClientesQ = await db.query(`
         SELECT COUNT(*) AS total FROM clientes
         WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
           AND status NOT IN ('cancelado')
       `)
-      // GMV do mês = apenas lives encerradas (mesma fonte do Analytics)
       const livesMesQ = await db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
         FROM lives
@@ -113,16 +109,95 @@ export async function homeRoutes(app) {
           AND status != 'expirado'
       `, [tenant_id])
 
-      // 5. Alertas
-      const alertasQ = await db.query(`
+      // 5. Taxa de conversão — ganhos / (ganhos + perdidos) de todos os leads fechados
+      const taxaConversaoQ = await db.query(`
         SELECT
-          (SELECT COUNT(*) FROM contratos WHERE status = 'em_analise') AS contratos_analise,
-          (SELECT COUNT(*) FROM boletos WHERE status IN ('vencido') OR (status = 'pendente' AND vencimento < NOW())) AS boletos_vencidos,
-          (SELECT COUNT(*) FROM leads WHERE pego_por IS NULL AND status = 'disponivel') AS leads_disponiveis
-      `)
-      const alertas = alertasQ.rows[0]
+          COUNT(*) FILTER (WHERE crm_etapa = 'ganho') AS ganhos,
+          COUNT(*) FILTER (WHERE crm_etapa IN ('ganho','perdido')) AS total_fechados
+        FROM leads
+        WHERE franqueadora_id = $1
+      `, [tenant_id])
 
-      // 5. Ranking do Dia (GMV gerado nas lives de hoje por cliente)
+      const ganhos = Number(taxaConversaoQ.rows[0].ganhos)
+      const totalFechados = Number(taxaConversaoQ.rows[0].total_fechados)
+      const taxaConversao = totalFechados > 0
+        ? parseFloat(((ganhos / totalFechados) * 100).toFixed(1))
+        : 0
+
+      // 6. Alertas operacionais completos
+      const alertasOpsQ = await db.query(`
+        SELECT
+          (SELECT COUNT(*) FROM clientes WHERE status = 'inadimplente') AS inadimplentes,
+          (SELECT COUNT(*) FROM contratos WHERE status IN ('rascunho','em_analise')) AS contratos_aguardando_assinatura,
+          (SELECT COUNT(*) FROM live_requests
+           WHERE data_solicitada >= DATE_TRUNC('week', CURRENT_DATE)
+             AND data_solicitada < DATE_TRUNC('week', CURRENT_DATE) + INTERVAL '7 days'
+             AND status IN ('aprovada','pendente')) AS agendamentos_semana,
+          (SELECT COUNT(*) FROM leads
+           WHERE franqueadora_id = $1
+             AND crm_etapa NOT IN ('ganho','perdido')
+             AND status != 'expirado'
+             AND COALESCE(atualizado_em, criado_em) < NOW() - INTERVAL '7 days') AS leads_parados,
+          (SELECT COUNT(*) FROM (
+            SELECT lr1.id
+            FROM live_requests lr1
+            JOIN live_requests lr2
+              ON lr1.cabine_id = lr2.cabine_id
+             AND lr1.data_solicitada = lr2.data_solicitada
+             AND lr1.id < lr2.id
+             AND lr1.hora_inicio < lr2.hora_fim
+             AND lr1.hora_fim > lr2.hora_inicio
+             AND lr1.status = 'aprovada'
+             AND lr2.status = 'aprovada'
+          ) t) AS conflitos_agenda,
+          (SELECT COUNT(*) FROM contratos WHERE status = 'em_analise') AS contratos_analise,
+          (SELECT COUNT(*) FROM boletos
+           WHERE status = 'vencido'
+              OR (status = 'pendente' AND vencimento < NOW())) AS boletos_vencidos,
+          (SELECT COUNT(*) FROM leads WHERE pego_por IS NULL AND status = 'disponivel') AS leads_disponiveis
+      `, [tenant_id])
+      const alertas = alertasOpsQ.rows[0]
+
+      // 7. Ocupação de cabines hoje
+      const ocupacaoQ = await db.query(`
+        SELECT
+          COUNT(*) FILTER (WHERE status = 'ao_vivo') AS ao_vivo,
+          COUNT(*) FILTER (WHERE ativo IS NOT FALSE) AS operacionais
+        FROM cabines
+      `)
+      const ocupacao = {
+        ao_vivo: Number(ocupacaoQ.rows[0].ao_vivo),
+        operacionais: Number(ocupacaoQ.rows[0].operacionais)
+      }
+
+      // 8. Próximas lives do dia (agendamentos aprovados com hora futura)
+      let proximasLives = []
+      try {
+        const proximasQ = await db.query(`
+          SELECT lr.id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
+                 c.numero AS cabine_numero, cl.nome AS cliente_nome
+          FROM live_requests lr
+          JOIN cabines c ON c.id = lr.cabine_id
+          JOIN clientes cl ON cl.id = lr.cliente_id
+          WHERE lr.data_solicitada = CURRENT_DATE
+            AND lr.hora_inicio > (CURRENT_TIME AT TIME ZONE 'America/Sao_Paulo')::time
+            AND lr.status = 'aprovada'
+          ORDER BY lr.hora_inicio
+          LIMIT 5
+        `)
+        proximasLives = proximasQ.rows.map(r => ({
+          id: r.id,
+          data_solicitada: r.data_solicitada,
+          hora_inicio: r.hora_inicio,
+          hora_fim: r.hora_fim,
+          cabine_numero: Number(r.cabine_numero),
+          cliente_nome: r.cliente_nome
+        }))
+      } catch (_) {
+        // live_requests pode não existir em ambientes sem a migration 025
+      }
+
+      // 9. Ranking do Dia
       const rankingResult = await db.query(`
         SELECT cl.nome, COALESCE(SUM(l.fat_gerado), 0) AS gmv, COUNT(l.id) AS lives
         FROM lives l
@@ -140,9 +215,11 @@ export async function homeRoutes(app) {
         lives: Number(r.lives)
       }))
 
-      // Montando o Payload final
+      const gmvMes = parseFloat(Number(livesMesQ.rows[0].gmv_lives_mes).toFixed(2))
+
       return {
         // Financeiro
+        gmv_mes:     gmvMes,
         fat_total:   parseFloat(fatBruto.toFixed(2)),
         fat_bruto:   parseFloat(fatBruto.toFixed(2)),
         fat_liquido: parseFloat(fatLiquido.toFixed(2)),
@@ -150,18 +227,30 @@ export async function homeRoutes(app) {
         // Cabines
         cabines: cabinesFormatadas,
 
-        // Resumo do mês
+        // Ocupação e próximas lives
+        ocupacao_cabines_hoje: ocupacao,
+        proximas_lives_dia: proximasLives,
+
         // Pipeline CRM
-        pipeline_aberto: Number(pipelineQ.rows[0].pipeline_aberto),
-        valor_pipeline:  parseFloat(Number(pipelineQ.rows[0].valor_pipeline).toFixed(2)),
+        pipeline_aberto:  Number(pipelineQ.rows[0].pipeline_aberto),
+        valor_pipeline:   parseFloat(Number(pipelineQ.rows[0].valor_pipeline).toFixed(2)),
+        taxa_conversao:   taxaConversao,
 
-        clientes_ativos:   Number(clientesQ.rows[0].total),
-        novos_clientes:    Number(novosClientesQ.rows[0].total),
-        lives_mes:         Number(livesMesQ.rows[0].lives_mes),
-        gmv_lives_mes:     parseFloat(Number(livesMesQ.rows[0].gmv_lives_mes).toFixed(2)),
-        media_viewers:     Math.round(Number(mediaViewersQ.rows[0].media)),
+        // Resumo do mês
+        clientes_ativos:  Number(clientesQ.rows[0].total),
+        novos_clientes:   Number(novosClientesQ.rows[0].total),
+        lives_mes:        Number(livesMesQ.rows[0].lives_mes),
+        gmv_lives_mes:    gmvMes,
+        media_viewers:    Math.round(Number(mediaViewersQ.rows[0].media)),
 
-        // Alertas
+        // Alertas operacionais
+        inadimplentes:                   Number(alertas.inadimplentes),
+        contratos_aguardando_assinatura: Number(alertas.contratos_aguardando_assinatura),
+        agendamentos_semana:             Number(alertas.agendamentos_semana),
+        leads_parados:                   Number(alertas.leads_parados),
+        conflitos_agenda:                Number(alertas.conflitos_agenda),
+
+        // Alertas legado
         contratos_analise: Number(alertas.contratos_analise),
         boletos_vencidos:  Number(alertas.boletos_vencidos),
         leads_disponiveis: Number(alertas.leads_disponiveis),
