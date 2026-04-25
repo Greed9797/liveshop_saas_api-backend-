@@ -65,7 +65,16 @@ async function main() {
   }
 
   console.log('\nProcesso de migrations finalizado.')
-  await pool.end()
 }
 
-main()
+// Exportável para uso no startup do servidor (sem fechar o pool)
+export async function runMigrations() {
+  await main()
+}
+
+// Execução direta via `node apply_migrations.js`
+const isMain = process.argv[1]?.endsWith('apply_migrations.js')
+if (isMain) {
+  await main()
+  await pool.end()
+}

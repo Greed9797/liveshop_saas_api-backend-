@@ -6,7 +6,9 @@ import { TikTokService } from './services/tiktok.js'
 import { cleanupOrphanContracts } from './jobs/cleanup_orphan_contracts.js'
 import * as connectorManager from './services/tiktok-connector-manager.js'
 import { startBillingEngine } from './jobs/billing_engine.js'
+import { runMigrations } from '../apply_migrations.js'
 
+await runMigrations()
 const app = await buildApp()
 
 // Initialize ConnectorManager with pool access and logger
