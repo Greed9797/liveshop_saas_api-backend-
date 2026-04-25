@@ -11,13 +11,17 @@ const createSchema = z.object({
   comissao_pct:    z.number().min(0).max(100).default(0),
   meta_diaria_gmv: z.number().min(0).default(0),
   observacoes:     z.string().optional(),
+  link_contrato:   z.string().optional(),
+  data_aniversario: z.string().optional(),
+  data_inicio:     z.string().optional(),
+  data_fim:        z.string().optional(),
 })
 
 const updateSchema = createSchema.partial().extend({
   ativo: z.boolean().optional(),
 })
 
-const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, criado_em`
+const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim, criado_em`
 
 export async function apresentadorasRoutes(app) {
   const access = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional'])]
@@ -28,7 +32,7 @@ export async function apresentadorasRoutes(app) {
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(
-        `SELECT ${COLS} FROM apresentadoras ORDER BY ativo DESC, nome ASC`
+        `SELECT ${COLS} FROM apresentadoras a ORDER BY a.ativo DESC, a.nome ASC`
       )
       return result.rows
     } finally { db.release() }
@@ -58,11 +62,12 @@ export async function apresentadorasRoutes(app) {
     const db = await app.dbTenant(tenant_id)
     try {
       const result = await db.query(
-        `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, observacoes)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, observacoes, link_contrato, data_aniversario, data_inicio, data_fim)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
          RETURNING ${COLS}`,
         [tenant_id, d.nome, d.telefone ?? null, d.cargo ?? null, d.email ?? null,
-         d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.observacoes ?? null]
+         d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.observacoes ?? null,
+         d.link_contrato ?? null, d.data_aniversario ?? null, d.data_inicio ?? null, d.data_fim ?? null]
       )
       return reply.code(201).send(result.rows[0])
     } finally { db.release() }
