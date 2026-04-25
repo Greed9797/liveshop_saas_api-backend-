@@ -51,6 +51,9 @@ async function main() {
     '034_contratos_pacote.sql',
     '035_manuais_metadata.sql',
     '036_cabines_ativo.sql',         // coluna ativo em cabines
+    '037_leads_crm_mvp.sql',         // CRM MVP: etapa, valor, responsavel, historico, tarefas, ganho
+    '038_pacotes_fixo_variavel.sql', // Pacotes: valor_fixo + comissao_pct separados
+    '039_apresentadoras.sql',        // Tabela apresentadoras
   ]
 
   for (const migration of pendingMigrations) {

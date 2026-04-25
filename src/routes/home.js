@@ -104,7 +104,16 @@ export async function homeRoutes(app) {
         WHERE date_trunc('month', captured_at) = date_trunc('month', NOW())
       `)
 
-      // 4. Alertas
+      // 4. Pipeline CRM (leads não ganhos e não perdidos)
+      const pipelineQ = await db.query(`
+        SELECT COUNT(*) AS pipeline_aberto, COALESCE(SUM(valor_oportunidade), 0) AS valor_pipeline
+        FROM leads
+        WHERE franqueadora_id = $1
+          AND crm_etapa NOT IN ('ganho','perdido')
+          AND status != 'expirado'
+      `, [tenant_id])
+
+      // 5. Alertas
       const alertasQ = await db.query(`
         SELECT
           (SELECT COUNT(*) FROM contratos WHERE status = 'em_analise') AS contratos_analise,
@@ -142,6 +151,10 @@ export async function homeRoutes(app) {
         cabines: cabinesFormatadas,
 
         // Resumo do mês
+        // Pipeline CRM
+        pipeline_aberto: Number(pipelineQ.rows[0].pipeline_aberto),
+        valor_pipeline:  parseFloat(Number(pipelineQ.rows[0].valor_pipeline).toFixed(2)),
+
         clientes_ativos:   Number(clientesQ.rows[0].total),
         novos_clientes:    Number(novosClientesQ.rows[0].total),
         lives_mes:         Number(livesMesQ.rows[0].lives_mes),

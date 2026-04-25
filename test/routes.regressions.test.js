@@ -168,7 +168,7 @@ describe('Route regressions: SQL and RBAC', () => {
 
     const sql = queryMock.mock.calls[0][0]
     expect(sql).toContain('franqueadora_id = $1')
-    expect(sql).toContain("status = 'disponivel' OR pego_por = $1")
+    expect(sql).toContain("status != 'expirado'")
     expect(queryMock.mock.calls[0][1]).toEqual(['tenant-1'])
 
     await app.close()

@@ -1,0 +1,108 @@
+import { z } from 'zod'
+
+const createSchema = z.object({
+  nome:            z.string().min(1),
+  telefone:        z.string().optional(),
+  cargo:           z.string().optional(),
+  email:           z.string().email().optional(),
+  cpf_cnpj:        z.string().optional(),
+  cidade:          z.string().optional(),
+  fixo:            z.number().min(0).default(0),
+  comissao_pct:    z.number().min(0).max(100).default(0),
+  meta_diaria_gmv: z.number().min(0).default(0),
+  observacoes:     z.string().optional(),
+})
+
+const updateSchema = createSchema.partial().extend({
+  ativo: z.boolean().optional(),
+})
+
+const COLS = `id, nome, telefone, cargo, email, cpf_cnpj, cidade, ativo, fixo, comissao_pct, meta_diaria_gmv, observacoes, criado_em`
+
+export async function apresentadorasRoutes(app) {
+  const access = [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente', 'operacional'])]
+
+  // GET /v1/apresentadoras
+  app.get('/v1/apresentadoras', { preHandler: access }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `SELECT ${COLS} FROM apresentadoras ORDER BY ativo DESC, nome ASC`
+      )
+      return result.rows
+    } finally { db.release() }
+  })
+
+  // GET /v1/apresentadoras/:id
+  app.get('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `SELECT ${COLS} FROM apresentadoras WHERE id = $1`,
+        [request.params.id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      return result.rows[0]
+    } finally { db.release() }
+  })
+
+  // POST /v1/apresentadoras
+  app.post('/v1/apresentadoras', { preHandler: access }, async (request, reply) => {
+    const parsed = createSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const d = parsed.data
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `INSERT INTO apresentadoras (tenant_id, nome, telefone, cargo, email, cpf_cnpj, cidade, fixo, comissao_pct, meta_diaria_gmv, observacoes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING ${COLS}`,
+        [tenant_id, d.nome, d.telefone ?? null, d.cargo ?? null, d.email ?? null,
+         d.cpf_cnpj ?? null, d.cidade ?? null, d.fixo, d.comissao_pct, d.meta_diaria_gmv, d.observacoes ?? null]
+      )
+      return reply.code(201).send(result.rows[0])
+    } finally { db.release() }
+  })
+
+  // PATCH /v1/apresentadoras/:id
+  app.patch('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+    const parsed = updateSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const updates = parsed.data
+    const fields = Object.keys(updates)
+    if (fields.length === 0) return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+
+    const setClauses = fields.map((f, i) => `${f} = $${i + 2}`).join(', ')
+    const values = [request.params.id, ...fields.map((f) => updates[f])]
+
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE apresentadoras SET ${setClauses} WHERE id = $1 RETURNING ${COLS}`,
+        values
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      return result.rows[0]
+    } finally { db.release() }
+  })
+
+  // DELETE /v1/apresentadoras/:id — desativa (soft delete)
+  app.delete('/v1/apresentadoras/:id', { preHandler: access }, async (request, reply) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const result = await db.query(
+        `UPDATE apresentadoras SET ativo = false WHERE id = $1 RETURNING id`,
+        [request.params.id]
+      )
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Apresentadora não encontrada' })
+      return reply.code(204).send()
+    } finally { db.release() }
+  })
+}
