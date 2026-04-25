@@ -26,6 +26,7 @@ import { solicitacoesRoutes } from './routes/solicitacoes.js'
 import { pacotesRoutes } from './routes/pacotes.js'
 import { usuariosRoutes } from './routes/usuarios.js'
 import { apresentadorasRoutes } from './routes/apresentadoras.js'
+import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 
 export async function buildApp(opts = {}) {
   const app = Fastify({
@@ -76,6 +77,7 @@ export async function buildApp(opts = {}) {
   await app.register(pacotesRoutes)
   await app.register(usuariosRoutes)
   await app.register(apresentadorasRoutes)
+  await app.register(liveApresentadoresRoutes)
 
   app.get('/health', () => ({ ok: true }))
 

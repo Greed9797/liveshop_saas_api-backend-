@@ -41,17 +41,31 @@ export async function homeRoutes(app) {
             cl.nome AS cliente_nome,
             u.nome AS apresentador,
             COALESCE(ls.viewer_count, 0) AS viewer_count,
-            COALESCE(ls.gmv, 0) AS gmv_atual
+            COALESCE(ls.gmv, 0) AS gmv_atual,
+            COALESCE(ct.horas_contratadas, 0) AS horas_contratadas,
+            COALESCE(enc.horas_realizadas_hoje, 0) AS horas_realizadas_hoje,
+            (SELECT JSON_AGG(u2.nome ORDER BY la.criado_em)
+             FROM live_apresentadores la
+             JOIN users u2 ON u2.id = la.apresentador_id
+             WHERE la.live_id = c.live_atual_id) AS apresentadores_extra
         FROM cabines c
         LEFT JOIN lives l ON l.id = c.live_atual_id
         LEFT JOIN clientes cl ON cl.id = l.cliente_id
         LEFT JOIN users u ON u.id = l.apresentador_id
+        LEFT JOIN contratos ct ON ct.id = c.contrato_id
         LEFT JOIN LATERAL (
             SELECT viewer_count, gmv
             FROM live_snapshots
             WHERE live_id = c.live_atual_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
+        LEFT JOIN LATERAL (
+            SELECT COALESCE(SUM(EXTRACT(EPOCH FROM (encerrado_em - iniciado_em)) / 3600.0), 0) AS horas_realizadas_hoje
+            FROM lives
+            WHERE cabine_id = c.id
+              AND status = 'encerrada'
+              AND date_trunc('day', iniciado_em) = date_trunc('day', NOW())
+        ) enc ON true
         WHERE c.ativo IS NOT FALSE
         ORDER BY c.numero
       `)
@@ -71,7 +85,10 @@ export async function homeRoutes(app) {
           gmv_atual: parseFloat(Number(c.gmv_atual).toFixed(2)),
           cliente_nome: c.cliente_nome,
           apresentador: c.apresentador,
-          duracao_min: duracaoMin
+          duracao_min: duracaoMin,
+          horas_contratadas: parseFloat(Number(c.horas_contratadas).toFixed(2)),
+          horas_realizadas_hoje: parseFloat(Number(c.horas_realizadas_hoje).toFixed(2)),
+          apresentadores_extra: c.apresentadores_extra || []
         }
       });
 

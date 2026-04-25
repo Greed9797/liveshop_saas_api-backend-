@@ -57,6 +57,7 @@ async function main() {
     '040_contact_history_meta_cliente.sql', // Telefone/e-mail tenant + histórico + meta cliente + apresentadora em live_requests
     '041_apresentadoras_extra_fields.sql',  // link_contrato, data_aniversario, data_inicio, data_fim
     '042_clientes_onboarding_step.sql',     // onboarding_step + status 'onboarding' no CHECK
+    '043_live_apresentadores.sql',          // Múltiplos apresentadores por live (junction table)
   ]
 
   for (const migration of pendingMigrations) {
