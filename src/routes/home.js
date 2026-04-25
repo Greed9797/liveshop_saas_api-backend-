@@ -52,6 +52,7 @@ export async function homeRoutes(app) {
             WHERE live_id = c.live_atual_id
             ORDER BY captured_at DESC LIMIT 1
         ) ls ON true
+        WHERE c.ativo IS NOT FALSE
         ORDER BY c.numero
       `)
 
@@ -78,13 +79,13 @@ export async function homeRoutes(app) {
       const clientesQ = await db.query(`
         SELECT COUNT(*) AS total
         FROM clientes
-        WHERE status NOT IN ('cancelado')
+        WHERE status = 'ativo'
       `)
       const novosClientesQ = await db.query(`
         SELECT COUNT(*) AS total FROM clientes
         WHERE date_trunc('month', criado_em AT TIME ZONE 'America/Sao_Paulo')
               = date_trunc('month', NOW() AT TIME ZONE 'America/Sao_Paulo')
-          AND status NOT IN ('cancelado')
+          AND status = 'ativo'
       `)
       const livesMesQ = await db.query(`
         SELECT COUNT(id) AS lives_mes, COALESCE(SUM(fat_gerado), 0) AS gmv_lives_mes
