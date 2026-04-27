@@ -58,6 +58,8 @@ async function main() {
     '041_apresentadoras_extra_fields.sql',  // link_contrato, data_aniversario, data_inicio, data_fim
     '042_clientes_onboarding_step.sql',     // onboarding_step + status 'onboarding' no CHECK
     '043_live_apresentadores.sql',          // Múltiplos apresentadores por live (junction table)
+    '044_clientes_logo_url.sql',            // logo_url em clientes
+    '045_cliente_metas.sql',               // Metas mensais de GMV por cliente
   ]
 
   for (const migration of pendingMigrations) {
