@@ -9,6 +9,18 @@ import { startBillingEngine } from './jobs/billing_engine.js'
 import { runMigrations } from '../apply_migrations.js'
 
 await runMigrations()
+
+// Auto-create Supabase Storage bucket if not exists
+const _sbUrl = process.env.SUPABASE_URL
+const _sbKey = process.env.SUPABASE_SERVICE_KEY
+if (_sbUrl && _sbKey) {
+  fetch(`${_sbUrl}/storage/v1/bucket`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${_sbKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'tenant-assets', name: 'tenant-assets', public: true }),
+  }).catch(() => {}) // ignore 409 already-exists
+}
+
 const app = await buildApp()
 
 // Initialize ConnectorManager with pool access and logger
