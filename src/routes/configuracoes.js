@@ -3,14 +3,16 @@ import { z } from 'zod'
 const ALLOWED_MIME = ['image/jpeg', 'image/png', 'image/webp', 'image/gif']
 
 const configSchema = z.object({
-  logo_url: z.string().url().or(z.literal('')).optional().nullable(),
-  nome: z.string().min(1).optional(),
-  asaas_api_key: z.string().optional().nullable(),
-  asaas_wallet_id: z.string().optional().nullable(),
+  logo_url:            z.string().url().or(z.literal('')).optional().nullable(),
+  nome:                z.string().min(1).optional(),
+  telefone_contato:    z.string().optional().nullable(),
+  email_contato:       z.string().email().optional().nullable(),
+  asaas_api_key:       z.string().optional().nullable(),
+  asaas_wallet_id:     z.string().optional().nullable(),
   tiktok_access_token: z.string().optional().nullable(),
-  tiktok_shop_id: z.string().optional().nullable(),
-  nova_senha: z.string().min(6).optional().nullable(),
-  meta_diaria_gmv: z.number().positive().optional().nullable(),
+  tiktok_shop_id:      z.string().optional().nullable(),
+  nova_senha:          z.string().min(6).optional().nullable(),
+  meta_diaria_gmv:     z.number().positive().optional().nullable(),
 })
 
 export async function configuracoesRoutes(app) {
@@ -62,38 +64,49 @@ export async function configuracoesRoutes(app) {
     return { url: publicUrl }
   })
 
-
   // GET /v1/configuracoes
-  app.get('/v1/configuracoes', { preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']) }, async (request, reply) => {
+  app.get('/v1/configuracoes', {
+    preHandler: app.requirePapel(['franqueado', 'franqueador_master', 'gerente']),
+  }, async (request) => {
     const { tenant_id } = request.user
     const db = await app.dbTenant(tenant_id)
-    
     try {
       const { rows } = await db.query(`
-        SELECT 
-          id, nome, logo_url,
-          asaas_api_key, asaas_wallet_id,
-          tiktok_access_token, tiktok_shop_id,
-          meta_diaria_gmv
-        FROM tenants 
-        WHERE id = $1
+        SELECT id, nome, logo_url,
+               telefone_contato, email_contato,
+               asaas_api_key, asaas_wallet_id,
+               tiktok_access_token, tiktok_shop_id,
+               meta_diaria_gmv
+        FROM tenants WHERE id = $1
       `, [tenant_id])
-      
+
       const conf = rows[0]
-      
-      // Ocultar chaves sensíveis parcialmente
-      const hideKey = (key) => key && key.length > 8 ? key.substring(0, 4) + '...' + key.substring(key.length - 4) : key
+      const hideKey = (key) => key && key.length > 8
+        ? key.substring(0, 4) + '...' + key.substring(key.length - 4)
+        : key
+
+      // Histórico de alterações de telefone/email
+      const histRows = await db.query(`
+        SELECT campo, valor_anterior, valor_novo, alterado_em
+        FROM tenant_contact_history
+        WHERE tenant_id = $1
+        ORDER BY alterado_em DESC
+        LIMIT 20
+      `, [tenant_id])
 
       return {
-        id: conf.id,
-        nome: conf.nome,
-        logo_url: conf.logo_url,
+        id:                   conf.id,
+        nome:                 conf.nome,
+        logo_url:             conf.logo_url,
+        telefone_contato:     conf.telefone_contato,
+        email_contato:        conf.email_contato,
         asaas_api_key_hidden: hideKey(conf.asaas_api_key),
-        has_asaas: !!conf.asaas_api_key,
-        asaas_wallet_id: conf.asaas_wallet_id,
-        has_tiktok: !!conf.tiktok_access_token,
-        tiktok_shop_id: conf.tiktok_shop_id,
-        meta_diaria_gmv: conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000
+        has_asaas:            !!conf.asaas_api_key,
+        asaas_wallet_id:      conf.asaas_wallet_id,
+        has_tiktok:           !!conf.tiktok_access_token,
+        tiktok_shop_id:       conf.tiktok_shop_id,
+        meta_diaria_gmv:      conf.meta_diaria_gmv ? Number(conf.meta_diaria_gmv) : 10000,
+        contact_history:      histRows.rows,
       }
     } finally {
       db.release()
@@ -101,7 +114,9 @@ export async function configuracoesRoutes(app) {
   })
 
   // PATCH /v1/configuracoes
-  app.patch('/v1/configuracoes', { preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])] }, async (request, reply) => {
+  app.patch('/v1/configuracoes', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado', 'gerente'])],
+  }, async (request, reply) => {
     const parsed = configSchema.safeParse(request.body)
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
 
@@ -112,49 +127,56 @@ export async function configuracoesRoutes(app) {
     try {
       await db.query('BEGIN')
 
-      // 1. Atualizar configs do Tenant
       const updates = []
       const values = [tenant_id]
       let paramIdx = 2
 
-      if (data.nome !== undefined) {
-        updates.push(`nome = $${paramIdx++}`)
-        values.push(data.nome)
-      }
-      if (data.logo_url !== undefined) {
-        updates.push(`logo_url = $${paramIdx++}`)
-        values.push(data.logo_url)
-      }
-      if (data.asaas_api_key !== undefined) {
-        updates.push(`asaas_api_key = $${paramIdx++}`)
-        values.push(data.asaas_api_key)
-      }
-      if (data.asaas_wallet_id !== undefined) {
-        updates.push(`asaas_wallet_id = $${paramIdx++}`)
-        values.push(data.asaas_wallet_id)
-      }
-      if (data.tiktok_access_token !== undefined) {
-        updates.push(`tiktok_access_token = $${paramIdx++}`)
-        values.push(data.tiktok_access_token)
-      }
-      if (data.tiktok_shop_id !== undefined) {
-        updates.push(`tiktok_shop_id = $${paramIdx++}`)
-        values.push(data.tiktok_shop_id)
-      }
-      if (data.meta_diaria_gmv !== undefined) {
-        updates.push(`meta_diaria_gmv = $${paramIdx++}`)
-        values.push(data.meta_diaria_gmv)
+      if (data.nome !== undefined)            { updates.push(`nome = $${paramIdx++}`);            values.push(data.nome) }
+      if (data.logo_url !== undefined)        { updates.push(`logo_url = $${paramIdx++}`);        values.push(data.logo_url) }
+      if (data.asaas_api_key !== undefined)   { updates.push(`asaas_api_key = $${paramIdx++}`);   values.push(data.asaas_api_key) }
+      if (data.asaas_wallet_id !== undefined) { updates.push(`asaas_wallet_id = $${paramIdx++}`); values.push(data.asaas_wallet_id) }
+      if (data.tiktok_access_token !== undefined) { updates.push(`tiktok_access_token = $${paramIdx++}`); values.push(data.tiktok_access_token) }
+      if (data.tiktok_shop_id !== undefined)  { updates.push(`tiktok_shop_id = $${paramIdx++}`);  values.push(data.tiktok_shop_id) }
+      if (data.meta_diaria_gmv !== undefined) { updates.push(`meta_diaria_gmv = $${paramIdx++}`); values.push(data.meta_diaria_gmv) }
+
+      // Campos de contato com histórico
+      if (data.telefone_contato !== undefined || data.email_contato !== undefined) {
+        const currentQ = await db.query(
+          `SELECT telefone_contato, email_contato FROM tenants WHERE id = $1`, [tenant_id]
+        )
+        const current = currentQ.rows[0]
+
+        if (data.telefone_contato !== undefined && data.telefone_contato !== current.telefone_contato) {
+          updates.push(`telefone_contato = $${paramIdx++}`)
+          values.push(data.telefone_contato)
+          await db.query(
+            `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
+             VALUES ($1, $2, 'telefone', $3, $4)`,
+            [tenant_id, user_id, current.telefone_contato, data.telefone_contato]
+          )
+        }
+        if (data.email_contato !== undefined && data.email_contato !== current.email_contato) {
+          updates.push(`email_contato = $${paramIdx++}`)
+          values.push(data.email_contato)
+          await db.query(
+            `INSERT INTO tenant_contact_history (tenant_id, alterado_por, campo, valor_anterior, valor_novo)
+             VALUES ($1, $2, 'email', $3, $4)`,
+            [tenant_id, user_id, current.email_contato, data.email_contato]
+          )
+        }
       }
 
       if (updates.length > 0) {
         await db.query(`UPDATE tenants SET ${updates.join(', ')} WHERE id = $1`, values)
       }
 
-      // 2. Atualizar senha se fornecida
       if (data.nova_senha) {
         const bcrypt = await import('bcrypt')
         const hash = await bcrypt.default.hash(data.nova_senha, 12)
-        await db.query(`UPDATE users SET senha_hash = $1 WHERE id = $2 AND tenant_id = $3`, [hash, user_id, tenant_id])
+        await db.query(
+          `UPDATE users SET senha_hash = $1 WHERE id = $2 AND tenant_id = $3`,
+          [hash, user_id, tenant_id]
+        )
       }
 
       await db.query('COMMIT')
@@ -162,6 +184,27 @@ export async function configuracoesRoutes(app) {
     } catch (e) {
       await db.query('ROLLBACK')
       throw e
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/configuracoes/contact-history
+  app.get('/v1/configuracoes/contact-history', {
+    preHandler: [app.authenticate, app.requirePapel(['franqueador_master', 'franqueado'])],
+  }, async (request) => {
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+    try {
+      const rows = await db.query(`
+        SELECT h.campo, h.valor_anterior, h.valor_novo, h.alterado_em, u.nome AS alterado_por_nome
+        FROM tenant_contact_history h
+        LEFT JOIN users u ON u.id = h.alterado_por
+        WHERE h.tenant_id = $1
+        ORDER BY h.alterado_em DESC
+        LIMIT 50
+      `, [tenant_id])
+      return rows.rows
     } finally {
       db.release()
     }
