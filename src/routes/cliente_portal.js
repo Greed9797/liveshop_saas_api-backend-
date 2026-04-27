@@ -210,4 +210,171 @@ export async function clientePortalRoutes(app) {
       db.release()
     }
   })
+
+  // GET /v1/cliente/agenda
+  app.get('/v1/cliente/agenda', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    // Parse and default date range to current week Mon–Sun
+    let { data_inicio, data_fim } = request.query
+
+    if (!data_inicio || !data_fim) {
+      const now = new Date()
+      const spNow = new Date(now.toLocaleString('en-US', { timeZone: 'America/Sao_Paulo' }))
+      const day = spNow.getDay() // 0=Sun
+      const diffToMon = (day === 0 ? -6 : 1 - day)
+      const mon = new Date(spNow)
+      mon.setDate(spNow.getDate() + diffToMon)
+      const sun = new Date(mon)
+      sun.setDate(mon.getDate() + 6)
+      const fmt = (d) => d.toISOString().slice(0, 10)
+      data_inicio = data_inicio ?? fmt(mon)
+      data_fim = data_fim ?? fmt(sun)
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data_inicio) || !/^\d{4}-\d{2}-\d{2}$/.test(data_fim)) {
+      return reply.code(400).send({ error: 'data_inicio e data_fim devem ser YYYY-MM-DD' })
+    }
+
+    // Resolve cliente_id from system db (no RLS yet)
+    const sysDb = await app.db.connect()
+    let clienteId, tenantId
+    try {
+      const res = await sysDb.query(
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
+        [request.user.email]
+      )
+      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      clienteId = res.rows[0].cliente_id
+      tenantId = res.rows[0].tenant_id
+    } finally {
+      sysDb.release()
+    }
+
+    const db = await app.dbTenant(tenantId)
+    try {
+      // All active cabines for this tenant
+      const cabinesRes = await db.query(
+        'SELECT id, numero FROM cabines WHERE ativo IS NOT FALSE ORDER BY numero'
+      )
+
+      // All live_requests in date range (exclude recusada)
+      const slotsRes = await db.query(
+        `SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
+                lr.status, lr.cliente_id,
+                (lr.cliente_id = $1) AS is_mine
+         FROM live_requests lr
+         WHERE lr.data_solicitada >= $2
+           AND lr.data_solicitada <= $3
+           AND lr.status != 'recusada'
+         ORDER BY lr.data_solicitada, lr.hora_inicio`,
+        [clienteId, data_inicio, data_fim]
+      )
+
+      const slots = slotsRes.rows.map((r) => {
+        const isMine = r.is_mine
+        const data = r.data_solicitada instanceof Date
+          ? r.data_solicitada.toISOString().slice(0, 10)
+          : String(r.data_solicitada).slice(0, 10)
+        const horaInicio = String(r.hora_inicio).slice(0, 5)
+        const horaFim = String(r.hora_fim).slice(0, 5)
+
+        if (isMine) {
+          const mappedStatus = r.status === 'aprovada' ? 'confirmada' : r.status // pendente stays pendente
+          return {
+            cabine_id: r.cabine_id,
+            data,
+            hora_inicio: horaInicio,
+            hora_fim: horaFim,
+            status: mappedStatus,
+            is_mine: true,
+            solicitacao_id: r.id,
+          }
+        } else {
+          return {
+            cabine_id: r.cabine_id,
+            data,
+            hora_inicio: horaInicio,
+            hora_fim: horaFim,
+            status: 'ocupado',
+            is_mine: false,
+          }
+        }
+      })
+
+      return reply.send({
+        cabines: cabinesRes.rows,
+        slots,
+      })
+    } finally {
+      db.release()
+    }
+  })
+
+  // POST /v1/cliente/solicitacao
+  app.post('/v1/cliente/solicitacao', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const { cabine_id, data_solicitada, hora_inicio, hora_fim, observacoes } = request.body ?? {}
+
+    if (!cabine_id || !data_solicitada || !hora_inicio || !hora_fim) {
+      return reply.code(400).send({ error: 'Campos obrigatórios: cabine_id, data_solicitada, hora_inicio, hora_fim' })
+    }
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data_solicitada)) {
+      return reply.code(400).send({ error: 'data_solicitada deve ser YYYY-MM-DD' })
+    }
+
+    // Resolve cliente_id + tenant_id from system db
+    const sysDb = await app.db.connect()
+    let clienteId, tenantId
+    try {
+      const res = await sysDb.query(
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
+        [request.user.email]
+      )
+      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      clienteId = res.rows[0].cliente_id
+      tenantId = res.rows[0].tenant_id
+    } finally {
+      sysDb.release()
+    }
+
+    const db = await app.dbTenant(tenantId)
+    try {
+      // Check for time overlap conflict
+      const conflictRes = await db.query(
+        `SELECT id FROM live_requests
+         WHERE cabine_id = $1
+           AND data_solicitada = $2
+           AND status != 'recusada'
+           AND hora_inicio < $4
+           AND hora_fim > $3
+         LIMIT 1`,
+        [cabine_id, data_solicitada, hora_inicio, hora_fim]
+      )
+
+      if (conflictRes.rows.length > 0) {
+        return reply.code(409).send({ error: 'Horário indisponível. Escolha outro horário ou cabine.' })
+      }
+
+      // Insert — use observacao (actual column name, no 's')
+      const obs = observacoes ?? null
+      const insertRes = await db.query(
+        `INSERT INTO live_requests (tenant_id, cliente_id, cabine_id, solicitante_id, data_solicitada, hora_inicio, hora_fim, status, observacao)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendente', $8)
+         RETURNING id, status`,
+        [tenantId, clienteId, cabine_id, request.user.id, data_solicitada, hora_inicio, hora_fim, obs]
+      )
+
+      const row = insertRes.rows[0]
+      return reply.code(201).send({
+        id: row.id,
+        status: row.status,
+        message: 'Solicitação enviada! A unidade irá confirmar em breve.',
+      })
+    } finally {
+      db.release()
+    }
+  })
 }
