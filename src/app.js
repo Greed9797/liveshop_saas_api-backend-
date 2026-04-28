@@ -41,12 +41,22 @@ export async function buildApp(opts = {}) {
         ? ['https://livelab-3601f.web.app', 'https://livelab-3601f.firebaseapp.com']
         : null)
 
+  const TIKTOK_ORIGINS = [
+    'https://developers.tiktok.com',
+    'https://business.tiktok.com',
+    'https://open.tiktokapis.com',
+    'https://open-api.tiktok.com',
+  ]
+
   await app.register(cors, {
     origin: (origin, cb) => {
-      // Server-to-server (webhooks, curl) — sem Origin header → sempre permitir
+      // Sem Origin = server-to-server (webhooks) → sempre permitir
       if (!origin) return cb(null, true)
-      // Dev: permitir tudo
+      // Dev → permitir tudo
       if (!corsAllowedOrigins) return cb(null, true)
+      // TikTok portals → sempre permitir (webhooks e OAuth callback)
+      if (TIKTOK_ORIGINS.some(o => origin.startsWith(o))) return cb(null, true)
+      // App Firebase → permitir
       if (corsAllowedOrigins.includes(origin)) return cb(null, true)
       cb(new Error('Not allowed by CORS'))
     },
