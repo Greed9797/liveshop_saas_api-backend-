@@ -21,6 +21,18 @@ const tarefaSchema = z.object({
   concluida: z.boolean().default(false),
 })
 
+const createLeadSchema = z.object({
+  nome:               z.string().min(1, 'Nome é obrigatório'),
+  nicho:              z.string().optional(),
+  cidade:             z.string().optional(),
+  estado:             z.string().optional(),
+  fat_estimado:       z.number().min(0).optional(),
+  valor_oportunidade: z.number().min(0).optional(),
+  responsavel_nome:   z.string().optional(),
+  origem:             z.string().optional(),
+  crm_etapa:          z.enum(CRM_ETAPAS).optional(),
+})
+
 const SELECT_CRM = `
   SELECT id, nome, nicho, cidade, estado, lat, lng, fat_estimado,
          status, pego_por, pego_em, expira_em, criado_em, atualizado_em,
@@ -203,6 +215,36 @@ export async function leadsRoutes(app) {
     } finally {
       client.release()
     }
+  })
+
+  // POST /v1/leads — cria lead manualmente (CRM)
+  app.post('/v1/leads', { preHandler: access }, async (request, reply) => {
+    const parsed = createLeadSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const { tenant_id } = request.user
+    const data = parsed.data
+    const fields = ['franqueadora_id', 'nome', 'status', 'pego_por', 'pego_em', 'crm_etapa']
+    const values = [tenant_id, data.nome, 'pego', tenant_id, new Date(), data.crm_etapa ?? 'lead_novo']
+    const optional = ['nicho', 'cidade', 'estado', 'fat_estimado', 'valor_oportunidade', 'responsavel_nome', 'origem']
+    for (const f of optional) {
+      if (data[f] !== undefined) {
+        fields.push(f)
+        values.push(data[f])
+      }
+    }
+    const placeholders = values.map((_, i) => `$${i + 1}`).join(', ')
+    const result = await app.db.query(
+      `INSERT INTO leads (${fields.join(', ')}, criado_em, atualizado_em)
+       VALUES (${placeholders}, NOW(), NOW())
+       RETURNING id, nome, nicho, cidade, estado, fat_estimado, status, pego_por, pego_em,
+                 crm_etapa, valor_oportunidade, responsavel_nome, origem,
+                 historico_contatos, observacoes_internas, tarefas, motivo_perda,
+                 convertido_cliente_id, ganho_em, criado_em, atualizado_em,
+                 (NOW() - criado_em) < interval '24 hours' AS is_novo`,
+      values
+    )
+    return reply.code(201).send(result.rows[0])
   })
 
   // POST /v1/leads/:id/pegar — pega lead disponível (fluxo legado)

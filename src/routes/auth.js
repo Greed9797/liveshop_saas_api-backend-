@@ -120,4 +120,39 @@ export async function authRoutes(app) {
     )
     return { ok: true }
   })
+
+  // PATCH /v1/auth/senha — usuário autenticado troca a própria senha
+  app.patch('/v1/auth/senha', { preHandler: app.authenticate }, async (request, reply) => {
+    const { senha_atual, nova_senha } = request.body ?? {}
+    if (typeof senha_atual !== 'string' || senha_atual.length < 1) {
+      return reply.code(400).send({ error: 'senha_atual é obrigatória' })
+    }
+    if (typeof nova_senha !== 'string' || nova_senha.length < 6) {
+      return reply.code(400).send({ error: 'nova_senha deve ter ao menos 6 caracteres' })
+    }
+
+    const userResult = await app.db.query(
+      `SELECT id, senha_hash FROM users WHERE id = $1 AND ativo = true`,
+      [request.user.sub]
+    )
+    const user = userResult.rows[0]
+    if (!user) return reply.code(404).send({ error: 'Usuário não encontrado' })
+
+    const senhaOk = await bcrypt.compare(senha_atual, user.senha_hash)
+    if (!senhaOk) return reply.code(401).send({ error: 'Senha atual incorreta' })
+
+    const novoHash = await bcrypt.hash(nova_senha, 10)
+    await app.db.query(
+      `UPDATE users SET senha_hash = $1, atualizado_em = NOW() WHERE id = $2`,
+      [novoHash, user.id]
+    )
+
+    // Revoga refresh tokens existentes — força re-login em outras sessões
+    await app.db.query(
+      `UPDATE refresh_tokens SET revogado = true WHERE user_id = $1`,
+      [user.id]
+    )
+
+    return { ok: true }
+  })
 }
