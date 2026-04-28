@@ -60,6 +60,7 @@ async function main() {
     '043_live_apresentadores.sql',          // Múltiplos apresentadores por live (junction table)
     '044_clientes_logo_url.sql',            // logo_url em clientes
     '045_cliente_metas.sql',               // Metas mensais de GMV por cliente
+    '046_tenants_contact_fields.sql',      // telefone_contato + email_contato em tenants
   ]
 
   for (const migration of pendingMigrations) {
