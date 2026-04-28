@@ -35,14 +35,23 @@ export async function buildApp(opts = {}) {
     ...opts,
   })
 
+  const corsAllowedOrigins = process.env.CORS_ORIGIN
+    ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+    : (process.env.NODE_ENV === 'production'
+        ? ['https://livelab-3601f.web.app', 'https://livelab-3601f.firebaseapp.com']
+        : null)
+
   await app.register(cors, {
-    origin: process.env.CORS_ORIGIN
-      ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
-      : (process.env.NODE_ENV === 'production'
-          ? ['https://livelab-3601f.web.app', 'https://livelab-3601f.firebaseapp.com']
-          : true),
+    origin: (origin, cb) => {
+      // Server-to-server (webhooks, curl) — sem Origin header → sempre permitir
+      if (!origin) return cb(null, true)
+      // Dev: permitir tudo
+      if (!corsAllowedOrigins) return cb(null, true)
+      if (corsAllowedOrigins.includes(origin)) return cb(null, true)
+      cb(new Error('Not allowed by CORS'))
+    },
     credentials: true,
-    allowedHeaders: ['Authorization', 'Content-Type', 'Accept'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'Accept', 'tiktok-signature'],
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
   })
   // Security headers (CSP disabled — TikTok callback returns text/html)
