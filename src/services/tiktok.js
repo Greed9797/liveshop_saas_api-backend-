@@ -3,29 +3,78 @@ export class TikTokService {
    * Busca dados da live ativa do tenant via API do TikTok
    */
   static async getLiveData(tenantId, accessToken) {
+    const offlineState = {
+      live_id: null,
+      status: 'offline',
+      viewer_count: 0,
+      total_viewers: 0,
+      duration_seconds: 0,
+      title: '',
+      total_orders: 0,
+      total_gmv: 0.00,
+      products_sold: []
+    }
+
+    if (!accessToken) {
+      return offlineState
+    }
+
     try {
-      // Endpoint real da TikTok Live API
-      // GET https://open.tiktokapis.com/v2/live/info/
-      // Aqui teremos a chamada real com 'fetch' quando a API de app real do TikTok for conectada
-      
-      // Simulando retorno para a integração:
-      console.log(`[TikTok] Buscando dados da live para o tenant: ${tenantId}`);
-      
+      // TikTok Live API — GET /v2/live/info/
+      // Docs: https://developers.tiktok.com/doc/tiktok-api-v2-live-info
+      const fields = [
+        'room_id', 'status', 'viewer_count', 'total_viewer_count',
+        'start_time', 'title'
+      ].join(',')
+      const url = `https://open.tiktokapis.com/v2/live/info/?fields=${fields}`
+
+      const res = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json'
+        }
+      })
+
+      if (!res.ok) {
+        if (res.status === 401) {
+          return { ...offlineState, _needsRefresh: true }
+        }
+        return offlineState
+      }
+
+      const json = await res.json()
+      const liveInfo = json?.data?.live_info ?? json?.data ?? null
+      if (!liveInfo || !liveInfo.room_id) {
+        return offlineState
+      }
+
+      const isLive = (liveInfo.status === 'live' || liveInfo.status === 1)
+      const startMs = liveInfo.start_time
+        ? Number(liveInfo.start_time) * 1000
+        : Date.now()
+      const durationSec = isLive
+        ? Math.max(0, Math.floor((Date.now() - startMs) / 1000))
+        : 0
+
+      // GMV / orders ainda não expostos pela TikTok Live Info API pública;
+      // valores derivados (caso futuramente disponíveis em outro endpoint).
+      const gmv = Number(liveInfo.gmv ?? 0)
+      const orders = Number(liveInfo.total_orders ?? 0)
+
       return {
-        // null indica que não há live ativa no momento
-        live_id: null,
-        status: 'offline', // 'ao_vivo' ou 'offline'
-        viewer_count: 0,
-        total_viewers: 0,
-        duration_seconds: 0,
-        title: '',
-        total_orders: 0,
-        total_gmv: 0.00,
-        products_sold: []
-      };
+        live_id: liveInfo.room_id,
+        status: isLive ? 'ao_vivo' : 'offline',
+        viewer_count: Number(liveInfo.viewer_count ?? 0),
+        total_viewers: Number(liveInfo.total_viewer_count ?? liveInfo.viewer_count ?? 0),
+        duration_seconds: durationSec,
+        title: liveInfo.title ?? '',
+        total_orders: orders,
+        total_gmv: gmv,
+        products_sold: Array.isArray(liveInfo.products) ? liveInfo.products : []
+      }
     } catch (error) {
-      console.error(`[TikTok] Erro ao buscar dados da live do tenant ${tenantId}:`, error);
-      return null;
+      console.error(`[TikTok] Erro ao buscar dados da live do tenant ${tenantId}:`, error.message)
+      return offlineState
     }
   }
 
@@ -97,13 +146,26 @@ export class TikTokService {
 
       for (const tenant of tenants) {
         try {
-          // 1. Verifica se token expirou (aqui ficaria a lógica verificando o tiktok_token_expires_at)
-          // await this.refreshToken(tenant.id, tenant.tiktok_refresh_token, db);
+          // 1. Busca dados da live na API do TikTok
+          let liveData = await this.getLiveData(tenant.id, tenant.tiktok_access_token);
 
-          // 2. Busca dados da live na API do TikTok
-          const liveData = await this.getLiveData(tenant.id, tenant.tiktok_access_token);
-          
           if (!liveData) continue;
+
+          // 2. Token expirado → tenta refresh + retry uma vez
+          if (liveData._needsRefresh && tenant.tiktok_refresh_token) {
+            const ok = await this.refreshToken(db, tenant.id, tenant.tiktok_refresh_token);
+            if (ok) {
+              const fresh = await db.query(
+                `SELECT tiktok_access_token FROM tenants WHERE id = $1`,
+                [tenant.id]
+              );
+              const newToken = fresh.rows[0]?.tiktok_access_token;
+              if (newToken) {
+                liveData = await this.getLiveData(tenant.id, newToken);
+                if (!liveData) continue;
+              }
+            }
+          }
 
           // Executar as queries com o contexto RLS do tenant
           // O hook dbTenant(tenant_id) do plugin DB é usado para forçar a segurança da query
