@@ -164,10 +164,22 @@ export async function tiktokRoutes(app) {
   })
 
   /**
+   * OPTIONS /v1/tiktok/webhook — preflight para TikTok (origem externa)
+   */
+  app.options('/v1/tiktok/webhook', async (request, reply) => {
+    reply
+      .header('Access-Control-Allow-Origin', '*')
+      .header('Access-Control-Allow-Methods', 'POST, OPTIONS')
+      .header('Access-Control-Allow-Headers', 'Content-Type, tiktok-signature')
+    return reply.code(204).send()
+  })
+
+  /**
    * POST /v1/tiktok/webhook
    * Recebe eventos assíncronos do TikTok Developer Portal.
    */
   app.post('/v1/tiktok/webhook', async (request, reply) => {
+    reply.header('Access-Control-Allow-Origin', '*')
     const payload = isObject(request.body) ? request.body : {}
     const eventType = typeof payload.event === 'string' ? payload.event : 'UNKNOWN'
     const userOpenId = typeof payload.user_openid === 'string' ? payload.user_openid : null
