@@ -31,6 +31,7 @@ export async function authRoutes(app) {
       tenant_id: user.tenant_id,
       papel: user.papel,
       nome: user.nome,
+      email: user.email,
     }
 
     const accessToken = app.jwt.sign(payload)
@@ -72,7 +73,7 @@ export async function authRoutes(app) {
       .digest('hex')
 
     const result = await app.db.query(
-      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.ativo
+      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.email, u.ativo
        FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1
          AND rt.revogado = false
@@ -95,6 +96,7 @@ export async function authRoutes(app) {
       tenant_id: rt.tenant_id,
       papel: rt.papel,
       nome: rt.nome,
+      email: rt.email,
     })
 
     // Emitir novo refresh token
