@@ -222,7 +222,7 @@ export async function clientePortalRoutes(app) {
     try {
       const result = await db.query(`
         SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
-               lr.status, lr.observacoes,
+               lr.status, lr.observacao,
                cab.numero AS cabine_numero
         FROM live_requests lr
         JOIN cabines cab ON cab.id = lr.cabine_id
@@ -241,7 +241,7 @@ export async function clientePortalRoutes(app) {
         hora_inicio: String(r.hora_inicio).slice(0, 5),
         hora_fim: String(r.hora_fim).slice(0, 5),
         status: r.status === 'aprovada' ? 'confirmada' : r.status,
-        observacoes: r.observacoes ?? null,
+        observacoes: r.observacao ?? null,
       }))
     } finally {
       db.release()
