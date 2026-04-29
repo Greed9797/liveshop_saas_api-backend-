@@ -301,7 +301,7 @@ export async function clientePortalRoutes(app) {
         `INSERT INTO live_requests (tenant_id, cliente_id, cabine_id, solicitante_id, data_solicitada, hora_inicio, hora_fim, status, observacao)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'pendente', $8)
          RETURNING id, status`,
-        [tenantId, clienteId, cabine_id, request.user.id, data_solicitada, hora_inicio, hora_fim, obs]
+        [tenantId, clienteId, cabine_id, request.user.sub, data_solicitada, hora_inicio, hora_fim, obs]
       )
 
       const row = insertRes.rows[0]
