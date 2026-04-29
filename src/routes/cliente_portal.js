@@ -126,7 +126,7 @@ export async function clientePortalRoutes(app) {
     }
 
     // Resolve cliente_id from system db (no RLS yet)
-    const sysDb = await app.db.connect()
+    const sysDb = await app.db.pool.connect()
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
@@ -200,6 +200,54 @@ export async function clientePortalRoutes(app) {
     }
   })
 
+  // GET /v1/cliente/reservas — solicitações de live do cliente (agenda pessoal)
+  app.get('/v1/cliente/reservas', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const sysDb = await app.db.pool.connect()
+    let clienteId, tenantId
+    try {
+      const res = await sysDb.query(
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
+        [request.user.email]
+      )
+      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      clienteId = res.rows[0].cliente_id
+      tenantId = res.rows[0].tenant_id
+    } finally {
+      sysDb.release()
+    }
+
+    const db = await app.dbTenant(tenantId)
+    try {
+      const result = await db.query(`
+        SELECT lr.id, lr.cabine_id, lr.data_solicitada, lr.hora_inicio, lr.hora_fim,
+               lr.status, lr.observacoes,
+               cab.numero AS cabine_numero
+        FROM live_requests lr
+        JOIN cabines cab ON cab.id = lr.cabine_id
+        WHERE lr.cliente_id = $1
+          AND lr.status != 'recusada'
+        ORDER BY lr.data_solicitada ASC, lr.hora_inicio ASC
+      `, [clienteId])
+
+      return result.rows.map((r) => ({
+        id: r.id,
+        cabine_id: r.cabine_id,
+        cabine_numero: r.cabine_numero,
+        data: r.data_solicitada instanceof Date
+          ? r.data_solicitada.toISOString().slice(0, 10)
+          : String(r.data_solicitada).slice(0, 10),
+        hora_inicio: String(r.hora_inicio).slice(0, 5),
+        hora_fim: String(r.hora_fim).slice(0, 5),
+        status: r.status === 'aprovada' ? 'confirmada' : r.status,
+        observacoes: r.observacoes ?? null,
+      }))
+    } finally {
+      db.release()
+    }
+  })
+
   // POST /v1/cliente/solicitacao
   app.post('/v1/cliente/solicitacao', {
     preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
@@ -215,7 +263,7 @@ export async function clientePortalRoutes(app) {
     }
 
     // Resolve cliente_id + tenant_id from system db
-    const sysDb = await app.db.connect()
+    const sysDb = await app.db.pool.connect()
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
@@ -262,6 +310,46 @@ export async function clientePortalRoutes(app) {
         status: row.status,
         message: 'Solicitação enviada! A unidade irá confirmar em breve.',
       })
+    } finally {
+      db.release()
+    }
+  })
+
+  // GET /v1/contratos/meu — contrato do cliente_parceiro autenticado
+  app.get('/v1/contratos/meu', {
+    preHandler: [app.authenticate, app.requirePapel(['cliente_parceiro'])],
+  }, async (request, reply) => {
+    const sysDb = await app.db.pool.connect()
+    let clienteId, tenantId
+    try {
+      const res = await sysDb.query(
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
+        [request.user.email]
+      )
+      if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
+      clienteId = res.rows[0].cliente_id
+      tenantId = res.rows[0].tenant_id
+    } finally {
+      sysDb.release()
+    }
+
+    const db = await app.dbTenant(tenantId)
+    try {
+      const result = await db.query(`
+        SELECT c.id, c.status, c.valor_fixo, c.comissao_pct,
+               c.horas_contratadas, c.horas_consumidas,
+               (c.horas_contratadas - c.horas_consumidas) AS horas_restantes,
+               c.assinado_em, c.ativado_em, c.criado_em,
+               p.nome AS pacote_nome
+        FROM contratos c
+        LEFT JOIN pacotes p ON p.id = c.pacote_id
+        WHERE c.cliente_id = $1
+        ORDER BY c.criado_em DESC
+        LIMIT 1
+      `, [clienteId])
+
+      if (!result.rows[0]) return reply.code(404).send({ error: 'Contrato não encontrado' })
+      return result.rows[0]
     } finally {
       db.release()
     }
