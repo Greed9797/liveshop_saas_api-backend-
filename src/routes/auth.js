@@ -32,6 +32,7 @@ export async function authRoutes(app) {
       papel: user.papel,
       nome: user.nome,
       email: user.email,
+      onboarding_completed: user.onboarding_completed ?? false,
     }
 
     const accessToken = app.jwt.sign(payload)
@@ -56,6 +57,7 @@ export async function authRoutes(app) {
         papel: user.papel,
         tenant_id: user.tenant_id,
         tenant_nome: user.tenant_nome,
+        onboarding_completed: user.onboarding_completed ?? false,
       },
     }
   })
@@ -73,7 +75,7 @@ export async function authRoutes(app) {
       .digest('hex')
 
     const result = await app.db.query(
-      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.email, u.ativo
+      `SELECT rt.*, u.tenant_id, u.papel, u.nome, u.email, u.ativo, u.onboarding_completed
        FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
        WHERE rt.token_hash = $1
          AND rt.revogado = false
@@ -97,6 +99,7 @@ export async function authRoutes(app) {
       papel: rt.papel,
       nome: rt.nome,
       email: rt.email,
+      onboarding_completed: rt.onboarding_completed ?? false,
     })
 
     // Emitir novo refresh token
