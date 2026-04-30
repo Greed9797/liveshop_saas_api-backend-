@@ -5,22 +5,52 @@ import { z } from 'zod'
 const convidarSchema = z.object({
   nome: z.string().min(2),
   email: z.string().email(),
-  papel: z.enum(['gerente', 'apresentador']),
+  papel: z.enum([
+    'gerente', 'gerente_comercial', 'financeiro', 'operacional',
+    'apresentador', 'apresentadora', 'cliente_parceiro',
+  ]),
+  cliente_id: z.string().uuid().optional(),
+  apresentadora_id: z.string().uuid().optional(),
+}).refine(d => d.papel !== 'cliente_parceiro' || !!d.cliente_id, {
+  message: 'cliente_id é obrigatório para papel cliente_parceiro',
+})
+
+const atualizarSchema = z.object({
+  nome: z.string().min(2).optional(),
+  papel: z.enum([
+    'gerente', 'gerente_comercial', 'financeiro', 'operacional',
+    'apresentador', 'apresentadora', 'cliente_parceiro',
+  ]).optional(),
+  ativo: z.boolean().optional(),
 })
 
 export async function usuariosRoutes(app) {
-  // GET /v1/usuarios — list tenant users (exclude self)
-  app.get('/v1/usuarios', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
-  }, async (request, reply) => {
+  const rbac = [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])]
+
+  // GET /v1/usuarios?papel=...&ativo=...
+  app.get('/v1/usuarios', { preHandler: rbac }, async (request, reply) => {
+    const { papel, ativo } = request.query
+    const conditions = ['tenant_id = $1', 'id != $2']
+    const values = [request.user.tenant_id, request.user.sub]
+    let idx = 3
+
+    if (papel) {
+      conditions.push(`papel = $${idx++}`)
+      values.push(papel)
+    }
+    if (ativo !== undefined) {
+      conditions.push(`ativo = $${idx++}`)
+      values.push(ativo === 'true')
+    }
+
     const db = await app.dbTenant(request.user.tenant_id)
     try {
       const result = await db.query(
-        `SELECT id, nome, email, papel, ativo, criado_em
+        `SELECT id, nome, email, papel, ativo, criado_em, criado_por
          FROM users
-         WHERE tenant_id = $1 AND id != $2
+         WHERE ${conditions.join(' AND ')}
          ORDER BY criado_em DESC`,
-        [request.user.tenant_id, request.user.sub]
+        values
       )
       return result.rows
     } finally {
@@ -28,50 +58,152 @@ export async function usuariosRoutes(app) {
     }
   })
 
-  // POST /v1/usuarios/convidar — create user with temp password
-  app.post('/v1/usuarios/convidar', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
-  }, async (request, reply) => {
+  // POST /v1/usuarios/convidar
+  app.post('/v1/usuarios/convidar', { preHandler: rbac }, async (request, reply) => {
     const parsed = convidarSchema.safeParse(request.body)
     if (!parsed.success) {
       return reply.code(400).send({ error: parsed.error.issues[0].message })
     }
-    const { nome, email, papel } = parsed.data
+    const { nome, email, papel, cliente_id, apresentadora_id } = parsed.data
+    const tenantId = request.user.tenant_id
 
-    const db = await app.dbTenant(request.user.tenant_id)
+    const existing = await app.db.query('SELECT id FROM users WHERE email = $1', [email])
+    if (existing.rows.length > 0) {
+      return reply.code(409).send({ error: 'E-mail já cadastrado' })
+    }
+
+    const senhaTemp = crypto.randomBytes(8).toString('hex')
+    const senhaHash = await bcrypt.hash(senhaTemp, 12)
+
+    const db = await app.dbTenant(tenantId)
     try {
-      // Check duplicate email globally (email has a global UNIQUE constraint)
-      const existing = await app.db.query('SELECT id FROM users WHERE email = $1', [email])
-      if (existing.rows.length > 0) {
-        return reply.code(409).send({ error: 'E-mail já cadastrado' })
+      await db.query('BEGIN')
+
+      const { rows } = await db.query(
+        `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo, criado_por)
+         VALUES ($1, $2, $3, $4, $5, true, $6)
+         RETURNING id, nome, email, papel, ativo, criado_em`,
+        [tenantId, nome, email, senhaHash, papel, request.user.sub]
+      )
+      const newUser = rows[0]
+
+      if (papel === 'cliente_parceiro') {
+        const updated = await db.query(
+          `UPDATE clientes SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
+          [newUser.id, cliente_id, tenantId]
+        )
+        if (updated.rowCount === 0) {
+          await db.query('ROLLBACK')
+          return reply.code(404).send({ error: 'Cliente não encontrado no tenant' })
+        }
       }
 
-      const senhaTemp = crypto.randomBytes(8).toString('hex')
-      const senhaHash = await bcrypt.hash(senhaTemp, 12)
+      if ((papel === 'apresentador' || papel === 'apresentadora') && apresentadora_id) {
+        await db.query(
+          `UPDATE apresentadoras SET user_id = $1 WHERE id = $2 AND tenant_id = $3`,
+          [newUser.id, apresentadora_id, tenantId]
+        )
+      }
 
-      const result = await db.query(
-        `INSERT INTO users (tenant_id, nome, email, senha_hash, papel, ativo)
-         VALUES ($1, $2, $3, $4, $5, true)
-         RETURNING id, nome, email, papel, ativo, criado_em`,
-        [request.user.tenant_id, nome, email, senhaHash, papel]
-      )
-      return reply.code(201).send({ ...result.rows[0], senha_temporaria: senhaTemp })
+      await db.query('COMMIT')
+      return reply.code(201).send({ ...newUser, senha_temporaria: senhaTemp })
+    } catch (e) {
+      await db.query('ROLLBACK')
+      throw e
     } finally {
       db.release()
     }
   })
 
-  // DELETE /v1/usuarios/:id — remove user (not self)
-  app.delete('/v1/usuarios/:id', {
-    preHandler: [app.authenticate, app.requirePapel(['franqueado', 'franqueador_master'])],
-  }, async (request, reply) => {
+  // PATCH /v1/usuarios/:id
+  app.patch('/v1/usuarios/:id', { preHandler: rbac }, async (request, reply) => {
     if (request.params.id === request.user.sub) {
-      return reply.code(400).send({ error: 'Não é possível remover a si mesmo' })
+      return reply.code(400).send({ error: 'Use /auth/senha para alterar seus próprios dados' })
     }
+
+    const parsed = atualizarSchema.safeParse(request.body)
+    if (!parsed.success) {
+      return reply.code(400).send({ error: parsed.error.issues[0].message })
+    }
+    const fields = parsed.data
+    if (Object.keys(fields).length === 0) {
+      return reply.code(400).send({ error: 'Nenhum campo para atualizar' })
+    }
+
+    const updates = []
+    const values = []
+    let idx = 1
+
+    for (const [key, val] of Object.entries(fields)) {
+      if (val !== undefined) {
+        updates.push(`${key} = $${idx++}`)
+        values.push(val)
+      }
+    }
+
+    const db = await app.dbTenant(request.user.tenant_id)
+    try {
+      if (fields.ativo === false) {
+        await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      }
+
+      values.push(request.params.id, request.user.tenant_id)
+      const result = await db.query(
+        `UPDATE users SET ${updates.join(', ')}
+         WHERE id = $${idx} AND tenant_id = $${idx + 1}
+         RETURNING id, nome, email, papel, ativo, criado_em`,
+        values
+      )
+      if (result.rows.length === 0) {
+        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      }
+      return result.rows[0]
+    } finally {
+      db.release()
+    }
+  })
+
+  // POST /v1/usuarios/:id/reset-senha
+  app.post('/v1/usuarios/:id/reset-senha', { preHandler: rbac }, async (request, reply) => {
+    if (request.params.id === request.user.sub) {
+      return reply.code(400).send({ error: 'Use /auth/senha para alterar sua própria senha' })
+    }
+
+    const novaSenha = crypto.randomBytes(8).toString('hex')
+    const senhaHash = await bcrypt.hash(novaSenha, 12)
+
     const db = await app.dbTenant(request.user.tenant_id)
     try {
       const result = await db.query(
-        'DELETE FROM users WHERE id = $1 AND tenant_id = $2 RETURNING id',
+        `UPDATE users SET senha_hash = $1
+         WHERE id = $2 AND tenant_id = $3
+         RETURNING id`,
+        [senhaHash, request.params.id, request.user.tenant_id]
+      )
+      if (result.rows.length === 0) {
+        return reply.code(404).send({ error: 'Usuário não encontrado' })
+      }
+      await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+      return { senha_temporaria: novaSenha }
+    } finally {
+      db.release()
+    }
+  })
+
+  // DELETE /v1/usuarios/:id — soft delete
+  app.delete('/v1/usuarios/:id', { preHandler: rbac }, async (request, reply) => {
+    if (request.params.id === request.user.sub) {
+      return reply.code(400).send({ error: 'Não é possível desativar a si mesmo' })
+    }
+
+    const db = await app.dbTenant(request.user.tenant_id)
+    try {
+      await db.query('DELETE FROM refresh_tokens WHERE user_id = $1', [request.params.id])
+
+      const result = await db.query(
+        `UPDATE users SET ativo = false
+         WHERE id = $1 AND tenant_id = $2
+         RETURNING id, nome, email, papel, ativo`,
         [request.params.id, request.user.tenant_id]
       )
       if (result.rows.length === 0) {

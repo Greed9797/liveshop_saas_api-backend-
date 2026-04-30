@@ -29,6 +29,7 @@ import { apresentadorasRoutes } from './routes/apresentadoras.js'
 import { liveApresentadoresRoutes } from './routes/live_apresentadores.js'
 import { clientePortalRoutes } from './routes/cliente_portal.js'
 import onboardingRoutes from './routes/onboarding.js'
+import { tenantsRoutes } from './routes/tenants.js'
 
 export async function buildApp(opts = {}) {
   const app = Fastify({
@@ -101,6 +102,7 @@ export async function buildApp(opts = {}) {
   await app.register(liveApresentadoresRoutes)
   await app.register(clientePortalRoutes)
   await app.register(onboardingRoutes)
+  await app.register(tenantsRoutes)
 
   app.get('/health', () => ({ ok: true }))
 

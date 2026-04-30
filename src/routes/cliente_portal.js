@@ -1,7 +1,7 @@
 export async function clientePortalRoutes(app) {
-  // Helper: resolve cliente_id from authenticated email
-  async function getClienteId(db, email) {
-    const res = await db.query('SELECT id FROM clientes WHERE email = $1 LIMIT 1', [email])
+  // Helper: resolve cliente_id from authenticated user_id (FK)
+  async function getClienteId(db, userId) {
+    const res = await db.query('SELECT id FROM clientes WHERE user_id = $1 LIMIT 1', [userId])
     return res.rows[0]?.id ?? null
   }
 
@@ -54,7 +54,7 @@ export async function clientePortalRoutes(app) {
 
     const db = await app.dbTenant(request.user.tenant_id)
     try {
-      const clienteId = await getClienteId(db, request.user.email)
+      const clienteId = await getClienteId(db, request.user.sub)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const res = await db.query(
@@ -81,7 +81,7 @@ export async function clientePortalRoutes(app) {
 
     const db = await app.dbTenant(request.user.tenant_id)
     try {
-      const clienteId = await getClienteId(db, request.user.email)
+      const clienteId = await getClienteId(db, request.user.sub)
       if (!clienteId) return reply.code(404).send({ error: 'Cliente não encontrado' })
 
       const res = await db.query(
@@ -130,8 +130,8 @@ export async function clientePortalRoutes(app) {
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
-        [request.user.email]
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
+        [request.user.sub]
       )
       if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       clienteId = res.rows[0].cliente_id
@@ -208,8 +208,8 @@ export async function clientePortalRoutes(app) {
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
-        [request.user.email]
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
+        [request.user.sub]
       )
       if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       clienteId = res.rows[0].cliente_id
@@ -267,8 +267,8 @@ export async function clientePortalRoutes(app) {
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
-        [request.user.email]
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
+        [request.user.sub]
       )
       if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       clienteId = res.rows[0].cliente_id
@@ -323,8 +323,8 @@ export async function clientePortalRoutes(app) {
     let clienteId, tenantId
     try {
       const res = await sysDb.query(
-        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.email = $1 LIMIT 1',
-        [request.user.email]
+        'SELECT c.id AS cliente_id, c.tenant_id FROM clientes c WHERE c.user_id = $1 LIMIT 1',
+        [request.user.sub]
       )
       if (!res.rows[0]) return reply.code(404).send({ error: 'Cliente não encontrado' })
       clienteId = res.rows[0].cliente_id

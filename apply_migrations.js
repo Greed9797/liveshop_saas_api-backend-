@@ -62,6 +62,7 @@ async function main() {
     '045_cliente_metas.sql',               // Metas mensais de GMV por cliente
     '046_tenants_contact_fields.sql',      // telefone_contato + email_contato em tenants
     '047_onboarding.sql',                  // onboarding_completed em users + tabela onboarding_responses
+    '048_users_management.sql',            // CHECK papéis expandido + user_id FK em clientes/apresentadoras + criado_por
   ]
 
   for (const migration of pendingMigrations) {
