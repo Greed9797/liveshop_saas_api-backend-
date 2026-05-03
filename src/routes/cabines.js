@@ -19,6 +19,38 @@ const encerrarSchema = z.object({
   fat_gerado: z.number().min(0),
 })
 
+const liveManualSchema = z.object({
+  cabine_id:        z.string().uuid(),
+  cliente_id:       z.string().uuid(),
+  apresentador_id:  z.string().uuid(),
+  apresentador2_id: z.string().uuid().optional(),
+  gestor_id:        z.string().uuid(),
+  data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/),
+  hora_fim:         z.string().regex(/^\d{2}:\d{2}$/),
+  fat_gerado:       z.number().min(0),
+  qtd_pedidos:      z.number().int().min(0),
+  resumo:           z.string().max(2000).optional(),
+}).refine(d => d.hora_fim > d.hora_inicio, {
+  message: 'hora_fim deve ser maior que hora_inicio',
+}).refine(d => !d.apresentador2_id || d.apresentador2_id !== d.apresentador_id, {
+  message: 'apresentadora 2 deve ser diferente da apresentadora 1',
+})
+
+const liveManualEditSchema = z.object({
+  cabine_id:        z.string().uuid().optional(),
+  cliente_id:       z.string().uuid().optional(),
+  apresentador_id:  z.string().uuid().optional(),
+  apresentador2_id: z.string().uuid().nullable().optional(),
+  gestor_id:        z.string().uuid().optional(),
+  data:             z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  hora_inicio:      z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  hora_fim:         z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  fat_gerado:       z.number().min(0).optional(),
+  qtd_pedidos:      z.number().int().min(0).optional(),
+  resumo:           z.string().max(2000).optional(),
+})
+
 const atualizarStatusSchema = z.object({
   status: z.enum(['disponivel', 'ativa', 'manutencao']),
 })
@@ -908,6 +940,156 @@ export async function cabinesRoutes(app) {
         await db.query('ROLLBACK')
         throw error
       }
+    } finally {
+      db.release()
+    }
+  })
+
+  // POST /v1/lives/manual — cria live já encerrada (entrada manual pelo gestor)
+  const gestorRoleAccess = [
+    app.authenticate,
+    app.requirePapel(['franqueador_master', 'franqueado', 'gerente']),
+  ]
+  app.post('/v1/lives/manual', { preHandler: gestorRoleAccess }, async (request, reply) => {
+    const parsed = liveManualSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const d = parsed.data
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      await db.query('BEGIN')
+
+      const cab = await db.query(
+        `SELECT c.contrato_id, ct.comissao_pct
+           FROM cabines c
+           LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+          WHERE c.id = $1`,
+        [d.cabine_id]
+      )
+      const comissaoPct = Number(cab.rows[0]?.comissao_pct ?? 0)
+      const comissao = d.fat_gerado * (comissaoPct / 100)
+
+      const iniciado = `${d.data} ${d.hora_inicio}:00`
+      const encerrado = `${d.data} ${d.hora_fim}:00`
+
+      const ins = await db.query(
+        `INSERT INTO lives
+           (tenant_id, cabine_id, cliente_id, apresentador_id, gestor_id,
+            status, iniciado_em, encerrado_em, fat_gerado, comissao_calculada,
+            final_orders_count, resumo)
+         VALUES ($1,$2,$3,$4,$5,'encerrada',$6,$7,$8,$9,$10,$11)
+         RETURNING id`,
+        [
+          tenant_id, d.cabine_id, d.cliente_id, d.apresentador_id, d.gestor_id,
+          iniciado, encerrado, d.fat_gerado, comissao, d.qtd_pedidos, d.resumo ?? null,
+        ]
+      )
+      const liveId = ins.rows[0].id
+
+      if (d.apresentador2_id) {
+        await db.query(
+          `INSERT INTO live_apresentadores (live_id, apresentador_id)
+           VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [liveId, d.apresentador2_id]
+        )
+      }
+
+      await db.query('COMMIT')
+      return reply.code(201).send({ id: liveId })
+    } catch (e) {
+      await db.query('ROLLBACK')
+      throw e
+    } finally {
+      db.release()
+    }
+  })
+
+  // PATCH /v1/lives/:id — edita dados de live encerrada (correção manual)
+  app.patch('/v1/lives/:id', { preHandler: gestorRoleAccess }, async (request, reply) => {
+    const parsed = liveManualEditSchema.safeParse(request.body)
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0].message })
+
+    const d = parsed.data
+    const { tenant_id } = request.user
+    const db = await app.dbTenant(tenant_id)
+
+    try {
+      await db.query('BEGIN')
+
+      const liveQ = await db.query(
+        `SELECT id, cabine_id, fat_gerado, iniciado_em, encerrado_em
+           FROM lives WHERE id = $1 AND status = 'encerrada' FOR UPDATE`,
+        [request.params.id]
+      )
+      const live = liveQ.rows[0]
+      if (!live) {
+        await db.query('ROLLBACK')
+        return reply.code(404).send({ error: 'Live não encontrada ou não está encerrada' })
+      }
+
+      const cabineId = d.cabine_id ?? live.cabine_id
+      let comissao = undefined
+      if (d.fat_gerado !== undefined) {
+        const cab = await db.query(
+          `SELECT ct.comissao_pct FROM cabines c
+             LEFT JOIN contratos ct ON ct.id = c.contrato_id AND ct.status = 'ativo'
+            WHERE c.id = $1`,
+          [cabineId]
+        )
+        const pct = Number(cab.rows[0]?.comissao_pct ?? 0)
+        comissao = d.fat_gerado * (pct / 100)
+      }
+
+      const updates = []
+      const values = []
+      let idx = 1
+
+      const addField = (col, val) => { updates.push(`${col} = $${idx++}`); values.push(val) }
+
+      if (d.cabine_id    !== undefined) addField('cabine_id',          d.cabine_id)
+      if (d.cliente_id   !== undefined) addField('cliente_id',         d.cliente_id)
+      if (d.apresentador_id !== undefined) addField('apresentador_id', d.apresentador_id)
+      if (d.gestor_id    !== undefined) addField('gestor_id',          d.gestor_id)
+      if (d.fat_gerado   !== undefined) { addField('fat_gerado', d.fat_gerado); addField('comissao_calculada', comissao) }
+      if (d.qtd_pedidos  !== undefined) addField('final_orders_count', d.qtd_pedidos)
+      if (d.resumo       !== undefined) addField('resumo',             d.resumo)
+
+      if (d.data !== undefined || d.hora_inicio !== undefined || d.hora_fim !== undefined) {
+        const currentInicio = new Date(live.iniciado_em)
+        const currentFim    = new Date(live.encerrado_em)
+        const data    = d.data        ?? currentInicio.toISOString().slice(0, 10)
+        const hInicio = d.hora_inicio ?? `${String(currentInicio.getUTCHours()).padStart(2,'0')}:${String(currentInicio.getUTCMinutes()).padStart(2,'0')}`
+        const hFim    = d.hora_fim    ?? `${String(currentFim.getUTCHours()).padStart(2,'0')}:${String(currentFim.getUTCMinutes()).padStart(2,'0')}`
+        if (hFim <= hInicio) {
+          await db.query('ROLLBACK')
+          return reply.code(400).send({ error: 'hora_fim deve ser maior que hora_inicio' })
+        }
+        addField('iniciado_em',  `${data} ${hInicio}:00`)
+        addField('encerrado_em', `${data} ${hFim}:00`)
+      }
+
+      if (updates.length > 0) {
+        values.push(request.params.id)
+        await db.query(`UPDATE lives SET ${updates.join(', ')} WHERE id = $${idx}`, values)
+      }
+
+      if ('apresentador2_id' in d) {
+        await db.query(`DELETE FROM live_apresentadores WHERE live_id = $1`, [request.params.id])
+        if (d.apresentador2_id) {
+          await db.query(
+            `INSERT INTO live_apresentadores (live_id, apresentador_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+            [request.params.id, d.apresentador2_id]
+          )
+        }
+      }
+
+      await db.query('COMMIT')
+      return reply.send({ ok: true })
+    } catch (e) {
+      await db.query('ROLLBACK')
+      throw e
     } finally {
       db.release()
     }

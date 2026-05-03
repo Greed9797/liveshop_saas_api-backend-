@@ -64,6 +64,7 @@ async function main() {
     '047_onboarding.sql',                  // onboarding_completed em users + tabela onboarding_responses
     '048_users_management.sql',            // CHECK papéis expandido + user_id FK em clientes/apresentadoras + criado_por
     '049_tenants_cnpj.sql',               // coluna cnpj em tenants
+    '050_lives_manual_entry.sql',         // gestor_id + resumo em lives (entrada manual)
   ]
 
   for (const migration of pendingMigrations) {
